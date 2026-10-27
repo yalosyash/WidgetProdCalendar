@@ -1,20 +1,19 @@
 ﻿# lib\App.ps1
-# Логика приложения: трей, окно, навигация, отрисовка, фоновая загрузка данных.
-# Сам подключает Data.ps1 и Calendar.ps1. Точка входа (ProdCalendar.ps1) только
-# создаёт app и запускает цикл сообщений.
+# Логика приложения: трей, окно, навигация ПО КВАРТАЛАМ, разворот окна вверх
+# (ещё один квартал), отрисовка и фоновая загрузка данных по годам.
+# Сам подключает Data.ps1 и Calendar.ps1.
 #
-# ВАЖНО про обработчики событий: scriptblock-и выполняются позже и в другой
-# области видимости, поэтому обращаются к состоянию через $script:pc (script scope),
-# а НЕ через локальные переменные функции Initialize-ProdCalendarApp.
+# Обработчики событий WinForms берут состояние из $script:pc (script scope),
+# потому что выполняются позже и в другой области видимости.
 
 . (Join-Path $PSScriptRoot 'Data.ps1')
 . (Join-Path $PSScriptRoot 'Calendar.ps1')
 
-function Get-YearDayOffset {
-    param([int]$Year, [int]$Month)
-    $off = 0
-    for ($m = 1; $m -lt $Month; $m++) { $off += [DateTime]::DaysInMonth($Year, $m) }
-    return $off
+function Get-QuarterMonths {
+    param([int]$Year, [int]$Quarter)
+    $first = ($Quarter - 1) * 3 + 1
+    # Скобки обязательны: запятая в литерале массива связывает сильнее '+'.
+    return @(($first), ($first + 1), ($first + 2))
 }
 
 function Get-SourceDisplayName {
@@ -23,7 +22,7 @@ function Get-SourceDisplayName {
         'api'     { return 'isdayoff.ru' }
         'cache'   { return 'кэш (последний ответ API)' }
         'offline' { return "офлайн ($Year)" }
-        default   { return 'нет' }
+        default   { return 'нет данных' }
     }
 }
 
@@ -37,158 +36,230 @@ function Initialize-ProdCalendarApp {
     $ui = New-CalendarUi -Scale $Scale
     $today = (Get-Date).Date
 
-    # Пути фиксируем сразу (внутри отложенных scriptblock-ов $PSScriptRoot пуст).
     $dataLib  = Join-Path $PSScriptRoot 'Data.ps1'
-    $projRoot = Split-Path -Parent $PSScriptRoot
+
+    $years = @(Get-AvailableYears)
+    if ($years.Count -eq 0) { $years = @($today.Year) }
 
     $pc = @{
-        Ui       = $ui
-        Form     = $ui.Form
-        Scale    = $Scale
-        State    = @{ Year = $today.Year; Month = $today.Month; Codes = $null; Source = ''; Years = @() }
-        LoadPs   = $null
-        LoadHnd  = $null
-        LastShow = [DateTime]::MinValue
-        Tray     = $null
-        Timer    = $null
-        Ctx      = New-Object System.Windows.Forms.ApplicationContext
+        Ui          = $ui
+        Form        = $ui.Surface
+        Scale       = $Scale
+        Year        = $today.Year
+        Quarter     = [int][Math]::Floor(($today.Month - 1) / 3) + 1
+        Expanded    = $false
+        Years       = $years
+        CodesByYear = @{}
+        SrcByYear   = @{}
+        Loading     = @{}
+        LoadPs      = @{}
+        LoadHnd     = @{}
+        HoverKey    = ''
+        LastShow    = [DateTime]::MinValue
+        Tray        = $null
+        Timer       = $null
+        Ctx         = New-Object System.Windows.Forms.ApplicationContext
+        DataLib     = $dataLib
     }
     $script:pc = $pc
 
     # --- показ / скрытие -----------------------------------------------------
-    $pc.Show = {
+    $pc.ResizeSurface = {
+        $pc = $script:pc
+        $rows = if ($pc.Expanded) { 2 } else { 1 }
+        $size = Get-CalendarSurfaceSize -Ui $pc.Ui -Rows $rows
+        $pc.Ui.Surface.ClientSize = New-Object System.Drawing.Size($size[0], $size[1])
+    }
+    $pc.Reposition = {
         $pc = $script:pc; $form = $pc.Form
         $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-        $form.Location = New-Object System.Drawing.Point(
-            ($wa.Right - $form.Width - [int](8 * $pc.Scale)),
-            ($wa.Bottom - $form.Height - [int](8 * $pc.Scale)))
-        $form.Show(); $form.Activate(); $form.BringToFront()
+        $mx = [int](8 * $pc.Scale)
+        $form.Location = New-Object System.Drawing.Point(($wa.Right - $form.Width - $mx), ($wa.Bottom - $form.Height - $mx))
+    }
+    $pc.Show = {
+        $pc = $script:pc
+        & $pc.Reposition
+        $pc.Form.Show(); $pc.Form.Activate(); $pc.Form.BringToFront()
         $pc.LastShow = [DateTime]::Now
     }
     $pc.Hide = { $script:pc.Form.Hide() }
     $pc.Toggle = { $pc = $script:pc; if ($pc.Form.Visible) { & $pc.Hide } else { & $pc.Show } }
 
-    # --- отрисовка -----------------------------------------------------------
-    $pc.UpdateView = {
-        $pc = $script:pc; $ui = $pc.Ui; $st = $pc.State
-        $ui.Title.Text = "{0} {1}" -f $script:CcMonthFull[$st.Month - 1], $st.Year
-
-        if ($null -eq $st.Codes) {
-            $ui.Summary.Text = "Нет данных за $($st.Year).`r`nПроверьте подключение к интернету или добавьте год офлайн-набором (-Years)."
-            $ui.Source.Text = 'данные: нет'
-            $ui.Grid.BackgroundImage = $null
-            $ui.Grid.Tag = $null
-            return
-        }
-
-        Draw-CalendarGrid -Ui $ui -Year $st.Year -Month $st.Month -Codes $st.Codes
-
-        $ms = Get-MonthStat -Codes $st.Codes -Month $st.Month -Year $st.Year
-        $ys = Get-YearStat -Codes $st.Codes
-        $ui.Summary.Text = (
-            "Месяц: календарных {0}, рабочих {1}, выходных {2}`r`n" +
-            "Норма 40ч {3} · 36ч {4} · 24ч {5}`r`n" +
-            "Год {6}: рабочих {7} из {8}`r`n" +
-            "Норма года {9} / {10} / {11}"
-        ) -f $ms.Calendar, $ms.Work, $ms.Off,
-             $ms.Hours40, $ms.Hours36, $ms.Hours24,
-             $st.Year, $ys.Work, $ys.Calendar, $ys.Hours40, $ys.Hours36, $ys.Hours24
-
-        $ui.Source.Text = 'данные: ' + (Get-SourceDisplayName -Source $st.Source -Year $st.Year)
-    }
-
-    # --- загрузка данных (в фоне) -------------------------------------------
-    $pc.StartLoad = {
+    # --- данные --------------------------------------------------------------
+    $pc.EnsureYear = {
         param([int]$Year)
         $pc = $script:pc
-        if ($pc.LoadPs) { try { $pc.LoadPs.Stop(); $pc.LoadPs.Dispose() } catch { } ; $pc.LoadPs = $null }
+        if ($pc.CodesByYear.ContainsKey($Year) -or $pc.Loading.ContainsKey($Year)) { return }
+        $pc.Loading[$Year] = $true
         $ps = [System.Management.Automation.PowerShell]::Create()
         [void]$ps.AddScript({
             param($libPath, $yr)
             . $libPath
             $d = Get-DayCodes -Year $yr
-            [pscustomobject]@{ Ok = $true; Year = $d.Year; Codes = $d.Codes; Source = $d.Source; Years = @(Get-AvailableYears) }
+            [pscustomobject]@{ Year = $d.Year; Codes = $d.Codes; Source = $d.Source }
         }).AddArgument($pc.DataLib).AddArgument($Year)
-        $pc.LoadHnd = $ps.BeginInvoke()
-        $pc.LoadPs = $ps
+        $pc.LoadHnd[$Year] = $ps.BeginInvoke()
+        $pc.LoadPs[$Year] = $ps
+    }
+    $pc.CompleteLoads = {
+        $pc = $script:pc
+        $changed = $false
+        foreach ($y in @($pc.LoadPs.Keys)) {
+            $ps = $pc.LoadPs[$y]
+            $hnd = $pc.LoadHnd[$y]
+            if (-not $hnd.IsCompleted) { continue }
+            try {
+                $out = $ps.EndInvoke($hnd)
+                $errs = $ps.Streams.Error.ReadAll()
+                if ($errs.Count -eq 0 -and $out.Count -gt 0) {
+                    $pc.CodesByYear[$y] = [string]$out[0].Codes
+                    $pc.SrcByYear[$y] = [string]$out[0].Source
+                } else {
+                    $pc.SrcByYear[$y] = 'none'
+                }
+            } catch {
+                $pc.SrcByYear[$y] = 'none'
+            } finally {
+                $ps.Dispose(); $pc.LoadPs.Remove($y); $pc.LoadHnd.Remove($y); $pc.Loading.Remove($y)
+            }
+            $changed = $true
+        }
+        if ($changed) { & $pc.UpdateView }
     }
 
-    $pc.CompleteLoad = {
-        $pc = $script:pc
-        if (-not $pc.LoadPs) { return }
-        if (-not $pc.LoadHnd.IsCompleted) { return }
-        $ps = $pc.LoadPs
-        try {
-            $out = $ps.EndInvoke($pc.LoadHnd)
-            $errs = $ps.Streams.Error.ReadAll()
-            if ($errs.Count -gt 0 -or $out.Count -eq 0) {
-                $pc.State.Codes = $null; $pc.State.Source = 'none'
-            } else {
-                $res = $out[0]
-                $pc.State.Year = [int]$res.Year
-                $pc.State.Codes = [string]$res.Codes
-                $pc.State.Source = [string]$res.Source
-                $pc.State.Years = @($res.Years)
-            }
-        } catch {
-            $pc.State.Codes = $null; $pc.State.Source = 'none'
-        } finally {
-            $ps.Dispose(); $pc.LoadPs = $null; $pc.LoadHnd = $null
+    # --- отрисовка -----------------------------------------------------------
+    $pc.UpdateView = {
+        $pc = $script:pc; $ui = $pc.Ui
+        $q = $pc.Quarter
+        $prevQ = $q - 1; $prevY = $pc.Year
+        if ($prevQ -lt 1) { $prevQ = 4; $prevY -= 1 }
+
+        $months = New-Object System.Collections.ArrayList
+        $needYears = New-Object System.Collections.Generic.HashSet[int]
+        $addMonth = {
+            param([int]$y, [int]$m)
+            $codes = $null
+            if ($pc.CodesByYear.ContainsKey($y)) { $codes = $pc.CodesByYear[$y] }
+            $stat = $null
+            if ($null -ne $codes) { $stat = Get-MonthStat -Codes $codes -Month $m -Year $y }
+            [void]$months.Add([pscustomobject]@{ Year = $y; Month = $m; Codes = $codes; Stat = $stat })
+            [void]$needYears.Add($y)
         }
-        & $pc.UpdateView
+
+        if ($pc.Expanded) {
+            foreach ($m in (Get-QuarterMonths -Year $prevY -Quarter $prevQ)) { & $addMonth $prevY $m }
+        }
+        foreach ($m in (Get-QuarterMonths -Year $pc.Year -Quarter $q)) { & $addMonth $pc.Year $m }
+
+        $header = "{0} · {1} квартал" -f $pc.Year, $script:CcQuarter[$q - 1]
+        if ($pc.Expanded) {
+            if ($prevY -eq $pc.Year) {
+                $header = "{0} · {1}–{2} квартал" -f $pc.Year, $script:CcQuarter[$prevQ - 1], $script:CcQuarter[$q - 1]
+            } else {
+                $header = "{0} {1} кв. → {2} {3} кв." -f $prevY, $script:CcQuarter[$prevQ - 1], $pc.Year, $script:CcQuarter[$q - 1]
+            }
+        }
+
+        $curCodes = $null
+        if ($pc.CodesByYear.ContainsKey($pc.Year)) { $curCodes = $pc.CodesByYear[$pc.Year] }
+        $src = 'нет'
+        if ($pc.SrcByYear.ContainsKey($pc.Year)) { $src = $pc.SrcByYear[$pc.Year] }
+        if ($null -eq $curCodes) {
+            $footerLeft = 'данные: загрузка...'
+        } else {
+            $footerLeft = 'данные: ' + (Get-SourceDisplayName -Source $src -Year $pc.Year)
+        }
+        $footerRight = if ($pc.Expanded) { "$([char]0x25BC) свернуть · ‹ › кварталы" } else { "$([char]0x25B2) развернуть · ‹ › кварталы" }
+
+        Draw-CalendarSurface -Ui $ui -Months $months.ToArray() -HeaderTitle $header `
+            -FooterLeft $footerLeft -FooterRight $footerRight -HoverKey $pc.HoverKey
+
+        foreach ($y in $needYears) { & $pc.EnsureYear $y }
     }
 
     # --- навигация -----------------------------------------------------------
     $pc.Step = {
         param([int]$Delta)
-        $pc = $script:pc; $st = $pc.State
-        $m = $st.Month + $Delta
-        $y = $st.Year
-        while ($m -lt 1) { $m += 12; $y -= 1 }
-        while ($m -gt 12) { $m -= 12; $y += 1 }
-        if ($st.Years.Count -gt 0) {
-            $minY = ($st.Years | Measure-Object -Minimum).Minimum
-            $maxY = ($st.Years | Measure-Object -Maximum).Maximum
+        $pc = $script:pc
+        $q = $pc.Quarter + $Delta
+        $y = $pc.Year
+        while ($q -lt 1) { $q += 4; $y -= 1 }
+        while ($q -gt 4) { $q -= 4; $y += 1 }
+        if ($pc.Years.Count -gt 0) {
+            $minY = ($pc.Years | Measure-Object -Minimum).Minimum
+            $maxY = ($pc.Years | Measure-Object -Maximum).Maximum
             if ($y -lt $minY -or $y -gt $maxY) { return }
         }
-        if ($y -ne $st.Year) {
-            $st.Year = $y; $st.Month = $m; $st.Codes = $null
-            & $pc.UpdateView
-            & $pc.StartLoad $y
-        } else {
-            $st.Month = $m
-            & $pc.UpdateView
-        }
+        $pc.Year = $y; $pc.Quarter = $q
+        & $pc.UpdateView
+    }
+    $pc.ToggleExpand = {
+        $pc = $script:pc
+        $pc.Expanded = -not $pc.Expanded
+        & $pc.ResizeSurface
+        & $pc.Reposition
+        & $pc.UpdateView
     }
 
-    # --- события UI ----------------------------------------------------------
-    $ui.BtnPrev.Add_Click({ & $script:pc.Step -Delta -1 })
-    $ui.BtnNext.Add_Click({ & $script:pc.Step -Delta 1 })
+    # --- мышь / клавиатура ---------------------------------------------------
+    $pc.HitTest = {
+        param([int]$X, [int]$Y)
+        $pc = $script:pc
+        $hits = $pc.Ui.Hits
+        for ($i = $hits.Count - 1; $i -ge 0; $i--) {
+            $r = $hits[$i].Rect
+            if ($X -ge $r.X -and $X -lt ($r.X + $r.Width) -and $Y -ge $r.Y -and $Y -lt ($r.Y + $r.Height)) { return $hits[$i] }
+        }
+        return $null
+    }
 
-    $ui.Grid.Add_MouseMove({
+    $pc.Form.Add_MouseMove({
         param($s, $e)
-        $pc = $script:pc; $tag = $s.Tag
-        if ($null -eq $tag) { return }
-        $col = [int][Math]::Floor($e.X / $pc.Ui.CellW)
-        $row = [int][Math]::Floor(($e.Y - $pc.Ui.WkH) / $pc.Ui.CellH)
-        if ($col -lt 0 -or $col -gt 6 -or $row -lt 0 -or $row -gt 5) { $pc.Ui.Tip.SetToolTip($s, ''); return }
-        $day = ($row * 7 + $col) - $tag.StartCol + 1
-        if ($day -lt 1 -or $day -gt $tag.Days) { $pc.Ui.Tip.SetToolTip($s, ''); return }
-        $code = $tag.Codes[(Get-YearDayOffset -Year $tag.Year -Month $tag.Month) + ($day - 1)]
-        $pc.Ui.Tip.SetToolTip($s, (Build-DayTooltip -Year $tag.Year -Month $tag.Month -Day $day -Code $code))
+        $pc = $script:pc
+        $hit = & $pc.HitTest $e.X $e.Y
+        $key = ''
+        if ($hit) {
+            if ($hit.Kind -in @('prev','next','expand')) { $key = $hit.Kind }
+            $pc.Ui.Tip.SetToolTip($pc.Form, $(if ($hit.Text) { $hit.Text } else { '' }))
+        } else {
+            $pc.Ui.Tip.SetToolTip($pc.Form, '')
+        }
+        if ($key -ne $pc.HoverKey) {
+            $pc.HoverKey = $key
+            & $pc.UpdateView
+        }
     })
-
-    $ui.Form.Add_KeyDown({
+    $pc.Form.Add_MouseLeave({ $script:pc.Ui.Tip.SetToolTip($script:pc.Form, '') })
+    $pc.Form.Add_MouseClick({
         param($s, $e)
-        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { & $script:pc.Hide; $e.Handled = $true }
+        if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+        $pc = $script:pc
+        $hit = & $pc.HitTest $e.X $e.Y
+        if (-not $hit) { return }
+        switch ($hit.Kind) {
+            'prev'   { & $pc.Step -Delta -1 }
+            'next'   { & $pc.Step -Delta 1 }
+            'expand' { & $pc.ToggleExpand }
+        }
     })
-    $ui.Form.Add_Deactivate({
+    $pc.Form.Add_KeyDown({
+        param($s, $e)
+        $pc = $script:pc
+        switch ($e.KeyCode) {
+            ([System.Windows.Forms.Keys]::Escape)   { & $pc.Hide; $e.Handled = $true }
+            ([System.Windows.Forms.Keys]::Left)     { & $pc.Step -Delta -1; $e.Handled = $true }
+            ([System.Windows.Forms.Keys]::Right)    { & $pc.Step -Delta 1; $e.Handled = $true }
+            ([System.Windows.Forms.Keys]::Up)       { if (-not $pc.Expanded) { & $pc.ToggleExpand }; $e.Handled = $true }
+            ([System.Windows.Forms.Keys]::Down)     { if ($pc.Expanded) { & $pc.ToggleExpand }; $e.Handled = $true }
+        }
+    })
+    $pc.Form.Add_Deactivate({
         if ((([DateTime]::Now) - $script:pc.LastShow).TotalMilliseconds -gt 250) { & $script:pc.Hide }
     })
 
     # --- трей ---------------------------------------------------------------
     $icon = $null
-    $icoPath = Join-Path $projRoot 'assets\calendar.ico'
+    $icoPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\calendar.ico'
     if (Test-Path $icoPath) { try { $icon = New-Object System.Drawing.Icon($icoPath) } catch { } }
     if ($null -eq $icon) { $icon = [System.Drawing.SystemIcons]::Application }
 
@@ -202,7 +273,11 @@ function Initialize-ProdCalendarApp {
     $miUpd = $menu.Items.Add('Обновить данные')
     $miExit = $menu.Items.Add('Выход')
     $miCal.Add_Click({ & $script:pc.Show })
-    $miUpd.Add_Click({ $script:pc.State.Codes = $null; & $script:pc.UpdateView; & $script:pc.StartLoad $script:pc.State.Year })
+    $miUpd.Add_Click({
+        $pc = $script:pc
+        $pc.CodesByYear = @{}; $pc.SrcByYear = @{}
+        & $pc.UpdateView
+    })
     $miExit.Add_Click({ $script:pc.Tray.Visible = $false; $script:pc.Tray.Dispose(); $script:pc.Ctx.ExitThread() })
     $tray.ContextMenuStrip = $menu
     $tray.Add_MouseClick({
@@ -213,12 +288,13 @@ function Initialize-ProdCalendarApp {
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 200
-    $timer.Add_Tick({ & $script:pc.CompleteLoad })
+    $timer.Add_Tick({ & $script:pc.CompleteLoads })
     $timer.Start()
 
     $pc.Tray = $tray
     $pc.Timer = $timer
-    $pc.DataLib = $dataLib
+
+    & $pc.ResizeSurface
     return $pc
 }
 
@@ -227,6 +303,6 @@ function Stop-ProdCalendarApp {
     if ($null -eq $App) { return }
     try { if ($App.Timer) { $App.Timer.Stop(); $App.Timer.Dispose() } } catch { }
     try { if ($App.Tray) { $App.Tray.Visible = $false; $App.Tray.Dispose() } } catch { }
-    try { if ($App.LoadPs) { $App.LoadPs.Dispose() } } catch { }
+    try { foreach ($ps in @($App.LoadPs.Values)) { $ps.Dispose() } } catch { }
     try { if ($App.Form) { $App.Form.Dispose() } } catch { }
 }

@@ -32,7 +32,6 @@ $pg.Dispose(); $probe.Dispose()
 . (Join-Path $PSScriptRoot 'lib\App.ps1')
 
 $app = Initialize-ProdCalendarApp -Scale $scale
-& $app.StartLoad $app.State.Year
 & $app.UpdateView
 
 try {
