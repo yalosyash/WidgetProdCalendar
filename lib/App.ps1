@@ -19,10 +19,10 @@ function Get-QuarterMonths {
 function Get-SourceDisplayName {
     param([string]$Source, [int]$Year)
     switch ($Source) {
-        'api'     { return 'isdayoff.ru' }
-        'cache'   { return 'кэш (последний ответ API)' }
+        'api' { return 'isdayoff.ru' }
+        'cache' { return 'кэш (последний ответ API)' }
         'offline' { return "офлайн ($Year)" }
-        default   { return 'нет данных' }
+        default { return 'нет данных' }
     }
 }
 
@@ -36,7 +36,7 @@ function Initialize-ProdCalendarApp {
     $ui = New-CalendarUi -Scale $Scale
     $today = (Get-Date).Date
 
-    $dataLib  = Join-Path $PSScriptRoot 'Data.ps1'
+    $dataLib = Join-Path $PSScriptRoot 'Data.ps1'
 
     $years = @(Get-AvailableYears)
     if ($years.Count -eq 0) { $years = @($today.Year) }
@@ -55,6 +55,9 @@ function Initialize-ProdCalendarApp {
         LoadPs      = @{}
         LoadHnd     = @{}
         HoverKey    = ''
+        TipKey      = ''
+        TipRect     = $null
+        TipShown    = $false
         LastShow    = [DateTime]::MinValue
         Tray        = $null
         Timer       = $null
@@ -63,12 +66,21 @@ function Initialize-ProdCalendarApp {
     }
     $script:pc = $pc
 
+    # Состояние по умолчанию: к нему виджет возвращается при каждом открытии.
+    $pc.Defaults = @{
+        Year     = $pc.Year
+        Quarter  = $pc.Quarter
+        Expanded = $false
+        HoverKey = ''
+    }
+
     # --- показ / скрытие -----------------------------------------------------
     $pc.ResizeSurface = {
         $pc = $script:pc
         $rows = if ($pc.Expanded) { 2 } else { 1 }
         $size = Get-CalendarSurfaceSize -Ui $pc.Ui -Rows $rows
         $pc.Ui.Surface.ClientSize = New-Object System.Drawing.Size($size[0], $size[1])
+        Set-CalendarFormRegion -Ui $pc.Ui
     }
     $pc.Reposition = {
         $pc = $script:pc; $form = $pc.Form
@@ -76,13 +88,40 @@ function Initialize-ProdCalendarApp {
         $mx = [int](8 * $pc.Scale)
         $form.Location = New-Object System.Drawing.Point(($wa.Right - $form.Width - $mx), ($wa.Bottom - $form.Height - $mx))
     }
+    $pc.ResetToDefault = {
+        # Виджет всегда открывается в исходном состоянии: разворот, выбранный
+        # квартал и подсветка сбрасываются. Размер меняем до Show, чтобы не мигало.
+        $pc = $script:pc
+        $changed = $false
+
+        if ($pc.Expanded) { $pc.Expanded = $false; $changed = $true }
+        if ($pc.Year -ne $pc.Defaults.Year -or $pc.Quarter -ne $pc.Defaults.Quarter) {
+            $pc.Year = $pc.Defaults.Year
+            $pc.Quarter = $pc.Defaults.Quarter
+            $changed = $true
+        }
+        if ($pc.HoverKey -ne $pc.Defaults.HoverKey) {
+            $pc.HoverKey = $pc.Defaults.HoverKey
+            $changed = $true
+        }
+        if (-not $changed) { return }
+
+        & $pc.ClearHover
+        & $pc.ResizeSurface
+        & $pc.UpdateView
+    }
     $pc.Show = {
         $pc = $script:pc
+        & $pc.ResetToDefault
         & $pc.Reposition
         $pc.Form.Show(); $pc.Form.Activate(); $pc.Form.BringToFront()
         $pc.LastShow = [DateTime]::Now
     }
-    $pc.Hide = { $script:pc.Form.Hide() }
+    $pc.Hide = {
+        $pc = $script:pc
+        & $pc.ClearHover
+        $pc.Form.Hide()
+    }
     $pc.Toggle = { $pc = $script:pc; if ($pc.Form.Visible) { & $pc.Hide } else { & $pc.Show } }
 
     # --- данные --------------------------------------------------------------
@@ -93,11 +132,11 @@ function Initialize-ProdCalendarApp {
         $pc.Loading[$Year] = $true
         $ps = [System.Management.Automation.PowerShell]::Create()
         [void]$ps.AddScript({
-            param($libPath, $yr)
-            . $libPath
-            $d = Get-DayCodes -Year $yr
-            [pscustomobject]@{ Year = $d.Year; Codes = $d.Codes; Source = $d.Source }
-        }).AddArgument($pc.DataLib).AddArgument($Year)
+                param($libPath, $yr)
+                . $libPath
+                $d = Get-DayCodes -Year $yr
+                [pscustomobject]@{ Year = $d.Year; Codes = $d.Codes; Source = $d.Source }
+            }).AddArgument($pc.DataLib).AddArgument($Year)
         $pc.LoadHnd[$Year] = $ps.BeginInvoke()
         $pc.LoadPs[$Year] = $ps
     }
@@ -114,12 +153,15 @@ function Initialize-ProdCalendarApp {
                 if ($errs.Count -eq 0 -and $out.Count -gt 0) {
                     $pc.CodesByYear[$y] = [string]$out[0].Codes
                     $pc.SrcByYear[$y] = [string]$out[0].Source
-                } else {
+                }
+                else {
                     $pc.SrcByYear[$y] = 'none'
                 }
-            } catch {
+            }
+            catch {
                 $pc.SrcByYear[$y] = 'none'
-            } finally {
+            }
+            finally {
                 $ps.Dispose(); $pc.LoadPs.Remove($y); $pc.LoadHnd.Remove($y); $pc.Loading.Remove($y)
             }
             $changed = $true
@@ -155,7 +197,8 @@ function Initialize-ProdCalendarApp {
         if ($pc.Expanded) {
             if ($prevY -eq $pc.Year) {
                 $header = "{0} · {1}–{2} квартал" -f $pc.Year, $script:CcQuarter[$prevQ - 1], $script:CcQuarter[$q - 1]
-            } else {
+            }
+            else {
                 $header = "{0} {1} кв. → {2} {3} кв." -f $prevY, $script:CcQuarter[$prevQ - 1], $pc.Year, $script:CcQuarter[$q - 1]
             }
         }
@@ -166,7 +209,8 @@ function Initialize-ProdCalendarApp {
         if ($pc.SrcByYear.ContainsKey($pc.Year)) { $src = $pc.SrcByYear[$pc.Year] }
         if ($null -eq $curCodes) {
             $footerLeft = 'данные: загрузка...'
-        } else {
+        }
+        else {
             $footerLeft = 'данные: ' + (Get-SourceDisplayName -Source $src -Year $pc.Year)
         }
         $footerRight = if ($pc.Expanded) { "$([char]0x25BC) свернуть · колесо — листать кварталы" } else { "$([char]0x25B2) развернуть · ‹ › или колесо — кварталы" }
@@ -191,14 +235,24 @@ function Initialize-ProdCalendarApp {
             if ($y -lt $minY -or $y -gt $maxY) { return }
         }
         $pc.Year = $y; $pc.Quarter = $q
+        & $pc.ClearHover
         & $pc.UpdateView
     }
     $pc.ToggleExpand = {
         $pc = $script:pc
+        & $pc.ClearHover
         $pc.Expanded = -not $pc.Expanded
-        & $pc.ResizeSurface
-        & $pc.Reposition
-        & $pc.UpdateView
+        # Пока меняем размер, перерисовку гасим: иначе Windows успевает показать
+        # старый кадр на новых размерах, и разворот выглядит как мерцание.
+        Set-CalendarRedraw -Form $pc.Form -Enable $false
+        try {
+            & $pc.ResizeSurface
+            & $pc.UpdateView
+            & $pc.Reposition
+        }
+        finally {
+            Set-CalendarRedraw -Form $pc.Form -Enable $true
+        }
     }
 
     # --- мышь / клавиатура ---------------------------------------------------
@@ -214,54 +268,131 @@ function Initialize-ProdCalendarApp {
     }
 
     $pc.Form.Add_MouseMove({
-        param($s, $e)
+            param($s, $e)
+            $pc = $script:pc
+            $hit = & $pc.HitTest $e.X $e.Y
+            $key = ''
+            if ($hit) {
+                if ($hit.ContainsKey('Kind') -and $hit.Kind -in @('prev', 'next', 'expand')) { $key = $hit.Kind }
+            }
+            if ($key -ne $pc.HoverKey) {
+                $pc.HoverKey = $key
+                & $pc.UpdateView
+            }
+            & $pc.TrackHover $hit
+        })
+    $pc.Form.Add_MouseLeave({
+            $pc = $script:pc
+            & $pc.ClearHover
+        })
+    # --- подсказки -----------------------------------------------------------
+    # Показываем не сразу, а после задержки наведения: иначе подсказки мигают
+    # при движении мыши. Задержка — отдельным таймером, чтобы не блокировать UI.
+    $pc.TipDelayMs = 450
+    # Если подсказка уже показана, соседний элемент обновляет её почти сразу:
+    # иначе перебор дней мышью постоянно прятал бы подсказку.
+    $pc.TipWarmMs = 90
+    $pc.TipKeyOf = {
+        # Ключ элемента для сравнения. Text есть не у всех областей (кнопки его не
+        # задают), а StrictMode падает на обращении к отсутствующему ключу.
+        param($Hit)
+        $label = if ($Hit.ContainsKey('Text')) { [string]$Hit.Text } else { '' }
+        return "$($Hit.Kind):$label"
+    }
+    $pc.TrackHover = {
+        param($Hit)
         $pc = $script:pc
-        $hit = & $pc.HitTest $e.X $e.Y
-        $key = ''
-        $text = ''
-        if ($hit) {
-            if ($hit.ContainsKey('Kind') -and $hit.Kind -in @('prev','next','expand')) { $key = $hit.Kind }
-            if ($hit.ContainsKey('Text')) { $text = [string]$hit.Text }
+        $target = $null
+        if ($Hit -and $Hit.ContainsKey('Tip')) { $target = $Hit.Tip }
+
+        if ($null -eq $target) {
+            # Курсор ушёл с элементов — прячем подсказку и сбрасываем ожидание.
+            if ($pc.TipKey) { & $pc.ClearHover }
+            return
         }
-        $pc.Ui.Tip.SetToolTip($pc.Form, $text)
-        if ($key -ne $pc.HoverKey) {
-            $pc.HoverKey = $key
-            & $pc.UpdateView
+
+        # Ключ по элементу и подписи: соседние дни не должны считаться одним
+        # элементом, иначе подсказка «переезжала» бы без новой задержки.
+        $newKey = & $pc.TipKeyOf $Hit
+        if ($pc.TipKey -eq $newKey) { return }
+
+        $pc.TipKey = $newKey
+        $pc.TipRect = $Hit.Rect
+        $pc.TipTimer.Stop()
+        if ($pc.TipShown) {
+            # Подсказка уже на экране: не мигаем, лишь чуть ждём и переставляем.
+            $pc.TipTimer.Interval = $pc.TipWarmMs
         }
-    })
-    $pc.Form.Add_MouseLeave({ $script:pc.Ui.Tip.SetToolTip($script:pc.Form, '') })
+        else {
+            Hide-CalendarTooltip -Ui $pc.Ui
+            $pc.TipTimer.Interval = $pc.TipDelayMs
+        }
+        $pc.TipTimer.Start()
+    }
+    $pc.ClearHover = {
+        $pc = $script:pc
+        $pc.TipTimer.Stop()
+        $pc.TipTimer.Interval = $pc.TipDelayMs
+        $pc.TipKey = ''
+        $pc.TipShown = $false
+        Hide-CalendarTooltip -Ui $pc.Ui
+    }
+    $pc.ShowCurrentTip = {
+        param([switch]$Force)
+        $pc = $script:pc
+        $pc.TipTimer.Stop()
+        if (-not $pc.TipKey -or $null -eq $pc.TipRect) { return }
+        $hit = $null
+        foreach ($h in $pc.Ui.Hits) {
+            if ($h.ContainsKey('Tip')) {
+                if ((& $pc.TipKeyOf $h) -eq $pc.TipKey) { $hit = $h; break }
+            }
+        }
+        if ($null -eq $hit) { return }
+        $r = $hit.Rect
+        if (-not $Force) {
+            # Страховка от показа устаревшей подсказки: если курсор уже ушёл
+            # с элемента, ничего не показываем.
+            $lp = $pc.Form.PointToClient([System.Windows.Forms.Cursor]::Position)
+            if ($lp.X -lt $r.X -or $lp.X -ge ($r.X + $r.Width) -or $lp.Y -lt $r.Y -or $lp.Y -ge ($r.Y + $r.Height)) { return }
+        }
+        Show-CalendarTooltip -Ui $pc.Ui -Tip $hit.Tip -Surface $pc.Form
+        $pc.TipShown = $true
+    }
+
     $pc.Form.Add_MouseWheel({
-        param($s, $e)
-        $pc = $script:pc
-        # Колесо листает кварталы в обоих режимах: вверх — к ранним, вниз — к поздним.
-        if ($e.Delta -gt 0) { & $pc.Step -Delta -1 } else { & $pc.Step -Delta 1 }
-    })
+            param($s, $e)
+            $pc = $script:pc
+            & $pc.ClearHover
+            # Колесо листает кварталы в обоих режимах: вверх — к ранним, вниз — к поздним.
+            if ($e.Delta -gt 0) { & $pc.Step -Delta -1 } else { & $pc.Step -Delta 1 }
+        })
     $pc.Form.Add_MouseClick({
-        param($s, $e)
-        if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
-        $pc = $script:pc
-        $hit = & $pc.HitTest $e.X $e.Y
-        if (-not $hit) { return }
-        switch ($hit.Kind) {
-            'prev'   { & $pc.Step -Delta -1 }
-            'next'   { & $pc.Step -Delta 1 }
-            'expand' { & $pc.ToggleExpand }
-        }
-    })
+            param($s, $e)
+            if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+            $pc = $script:pc
+            $hit = & $pc.HitTest $e.X $e.Y
+            if (-not $hit) { return }
+            switch ($hit.Kind) {
+                'prev' { & $pc.Step -Delta -1 }
+                'next' { & $pc.Step -Delta 1 }
+                'expand' { & $pc.ToggleExpand }
+            }
+        })
     $pc.Form.Add_KeyDown({
-        param($s, $e)
-        $pc = $script:pc
-        switch ($e.KeyCode) {
-            ([System.Windows.Forms.Keys]::Escape)   { & $pc.Hide; $e.Handled = $true }
-            ([System.Windows.Forms.Keys]::Left)     { & $pc.Step -Delta -1; $e.Handled = $true }
-            ([System.Windows.Forms.Keys]::Right)    { & $pc.Step -Delta 1; $e.Handled = $true }
-            ([System.Windows.Forms.Keys]::Up)       { if (-not $pc.Expanded) { & $pc.ToggleExpand }; $e.Handled = $true }
-            ([System.Windows.Forms.Keys]::Down)     { if ($pc.Expanded) { & $pc.ToggleExpand }; $e.Handled = $true }
-        }
-    })
+            param($s, $e)
+            $pc = $script:pc
+            switch ($e.KeyCode) {
+                ([System.Windows.Forms.Keys]::Escape) { & $pc.Hide; $e.Handled = $true }
+                ([System.Windows.Forms.Keys]::Left) { & $pc.Step -Delta -1; $e.Handled = $true }
+                ([System.Windows.Forms.Keys]::Right) { & $pc.Step -Delta 1; $e.Handled = $true }
+                ([System.Windows.Forms.Keys]::Up) { if (-not $pc.Expanded) { & $pc.ToggleExpand }; $e.Handled = $true }
+                ([System.Windows.Forms.Keys]::Down) { if ($pc.Expanded) { & $pc.ToggleExpand }; $e.Handled = $true }
+            }
+        })
     $pc.Form.Add_Deactivate({
-        if ((([DateTime]::Now) - $script:pc.LastShow).TotalMilliseconds -gt 250) { & $script:pc.Hide }
-    })
+            if ((([DateTime]::Now) - $script:pc.LastShow).TotalMilliseconds -gt 250) { & $script:pc.Hide }
+        })
 
     # --- трей ---------------------------------------------------------------
     $icon = $null
@@ -280,16 +411,17 @@ function Initialize-ProdCalendarApp {
     $miExit = $menu.Items.Add('Выход')
     $miCal.Add_Click({ & $script:pc.Show })
     $miUpd.Add_Click({
-        $pc = $script:pc
-        $pc.CodesByYear = @{}; $pc.SrcByYear = @{}
-        & $pc.UpdateView
-    })
+            $pc = $script:pc
+            & $pc.ClearHover
+            $pc.CodesByYear = @{}; $pc.SrcByYear = @{}
+            & $pc.UpdateView
+        })
     $miExit.Add_Click({ $script:pc.Tray.Visible = $false; $script:pc.Tray.Dispose(); $script:pc.Ctx.ExitThread() })
     $tray.ContextMenuStrip = $menu
     $tray.Add_MouseClick({
-        param($s, $e)
-        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { & $script:pc.Toggle }
-    })
+            param($s, $e)
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { & $script:pc.Toggle }
+        })
     $tray.Add_DoubleClick({ & $script:pc.Show })
 
     $timer = New-Object System.Windows.Forms.Timer
@@ -297,8 +429,14 @@ function Initialize-ProdCalendarApp {
     $timer.Add_Tick({ & $script:pc.CompleteLoads })
     $timer.Start()
 
+    # Таймер задержки подсказок: срабатывает один раз после паузы курсора.
+    $tipTimer = New-Object System.Windows.Forms.Timer
+    $tipTimer.Interval = [Math]::Max(1, [int]$pc.TipDelayMs)
+    $tipTimer.Add_Tick({ & $script:pc.ShowCurrentTip })
+
     $pc.Tray = $tray
     $pc.Timer = $timer
+    $pc.TipTimer = $tipTimer
 
     & $pc.ResizeSurface
     return $pc
@@ -307,8 +445,11 @@ function Initialize-ProdCalendarApp {
 function Stop-ProdCalendarApp {
     param($App)
     if ($null -eq $App) { return }
+    try { if ($App.TipTimer) { $App.TipTimer.Stop(); $App.TipTimer.Dispose() } } catch { }
     try { if ($App.Timer) { $App.Timer.Stop(); $App.Timer.Dispose() } } catch { }
     try { if ($App.Tray) { $App.Tray.Visible = $false; $App.Tray.Dispose() } } catch { }
     try { foreach ($ps in @($App.LoadPs.Values)) { $ps.Dispose() } } catch { }
+    try { if ($App.Ui -and $App.Ui.TipBmp) { $App.Ui.TipBmp.Dispose() } } catch { }
+    try { if ($App.Ui -and $App.Ui.TipForm) { $App.Ui.TipForm.Dispose() } } catch { }
     try { if ($App.Form) { $App.Form.Dispose() } } catch { }
 }
