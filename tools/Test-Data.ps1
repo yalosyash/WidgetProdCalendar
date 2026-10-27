@@ -42,6 +42,7 @@ try {
     $arrowsInExpanded = @($app.Ui.Hits | Where-Object { $_.Kind -in @('prev','next') }).Count
     Write-Host ("  стрелки в развёрнутом виде (ожидаем 0): {0}" -f $arrowsInExpanded)
     & $app.ToggleExpand;   Write-Host ("  сворачивание: {0} карточек" -f (@($app.Ui.Hits | Where-Object Kind -eq 'card').Count))
+    Write-Host ("  стрелки в свёрнутом виде (ожидаем 2): {0}" -f (@($app.Ui.Hits | Where-Object { $_.Kind -in @('prev','next') }).Count))
     Write-Host '  навигация OK'
 } finally {
     Stop-ProdCalendarApp -App $app

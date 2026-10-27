@@ -169,7 +169,7 @@ function Initialize-ProdCalendarApp {
         } else {
             $footerLeft = 'данные: ' + (Get-SourceDisplayName -Source $src -Year $pc.Year)
         }
-        $footerRight = if ($pc.Expanded) { "$([char]0x25BC) свернуть · колесо — листать кварталы" } else { "$([char]0x25B2) развернуть · ‹ › кварталы" }
+        $footerRight = if ($pc.Expanded) { "$([char]0x25BC) свернуть · колесо — листать кварталы" } else { "$([char]0x25B2) развернуть · ‹ › или колесо — кварталы" }
 
         Draw-CalendarSurface -Ui $ui -Months $months.ToArray() -HeaderTitle $header `
             -FooterLeft $footerLeft -FooterRight $footerRight -HoverKey $pc.HoverKey -ShowArrows (-not $pc.Expanded)
@@ -233,8 +233,7 @@ function Initialize-ProdCalendarApp {
     $pc.Form.Add_MouseWheel({
         param($s, $e)
         $pc = $script:pc
-        # В развёрнутом виде стрелки скрыты: кварталы листаются колесом.
-        if (-not $pc.Expanded) { return }
+        # Колесо листает кварталы в обоих режимах: вверх — к ранним, вниз — к поздним.
         if ($e.Delta -gt 0) { & $pc.Step -Delta -1 } else { & $pc.Step -Delta 1 }
     })
     $pc.Form.Add_MouseClick({
