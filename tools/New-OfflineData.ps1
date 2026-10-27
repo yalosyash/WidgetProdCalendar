@@ -22,13 +22,13 @@ $ErrorActionPreference = 'Stop'
 
 # Эталон 2026 для самопроверки (не подгоняем — сверяем).
 $Expect2026 = @{
-    Length   = 365
-    Work     = 247   # рабочих дней (коды '0' + '2', сокращённые тоже рабочие)
-    Off      = 118   # код '1'
-    Short    = 4     # код '2'
-    Hours40  = 1972.0
-    Hours36  = 1774.4
-    Hours24  = 1181.6
+    Length  = 365
+    Work    = 247   # рабочих дней (коды '0' + '2', сокращённые тоже рабочие)
+    Off     = 118   # код '1'
+    Short   = 4     # код '2'
+    Hours40 = 1972.0
+    Hours36 = 1774.4
+    Hours24 = 1181.6
 }
 
 function Get-YearCodes {
@@ -77,14 +77,14 @@ foreach ($year in $Years) {
     $stats = Get-Stats -Codes $codes
     $result["$year"] = $codes
     Write-Host (" OK  раб={0} вых={1} сокр={2}  норм 40/36/24 = {3} / {4} / {5}" -f `
-        $stats.Work, $stats.Off, $stats.Short, $stats.Hours40, $stats.Hours36, $stats.Hours24)
+            $stats.Work, $stats.Off, $stats.Short, $stats.Hours40, $stats.Hours36, $stats.Hours24)
 
     if ($year -eq 2026) {
         $fail = @()
         if ($codes.Length -ne $Expect2026.Length) { $fail += "длина $($codes.Length) <> $($Expect2026.Length)" }
-        if ($stats.Work  -ne $Expect2026.Work)    { $fail += "рабочих $($stats.Work) <> $($Expect2026.Work)" }
-        if ($stats.Off   -ne $Expect2026.Off)     { $fail += "выходных $($stats.Off) <> $($Expect2026.Off)" }
-        if ($stats.Short -ne $Expect2026.Short)   { $fail += "сокращённых $($stats.Short) <> $($Expect2026.Short)" }
+        if ($stats.Work -ne $Expect2026.Work) { $fail += "рабочих $($stats.Work) <> $($Expect2026.Work)" }
+        if ($stats.Off -ne $Expect2026.Off) { $fail += "выходных $($stats.Off) <> $($Expect2026.Off)" }
+        if ($stats.Short -ne $Expect2026.Short) { $fail += "сокращённых $($stats.Short) <> $($Expect2026.Short)" }
         if ($stats.Hours40 -ne $Expect2026.Hours40) { $fail += "40ч $($stats.Hours40) <> $($Expect2026.Hours40)" }
         if ($stats.Hours36 -ne $Expect2026.Hours36) { $fail += "36ч $($stats.Hours36) <> $($Expect2026.Hours36)" }
         if ($stats.Hours24 -ne $Expect2026.Hours24) { $fail += "24ч $($stats.Hours24) <> $($Expect2026.Hours24)" }

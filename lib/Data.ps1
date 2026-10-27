@@ -8,11 +8,11 @@ Set-StrictMode -Version Latest
 # --- TLS: в PowerShell 5.1 без этого https может отвалиться даже при живой сети.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$script:LibRoot   = Split-Path -Parent $PSScriptRoot          # ...\ProdCalendar
+$script:LibRoot = Split-Path -Parent $PSScriptRoot          # ...\ProdCalendar
 $script:OfflineFile = Join-Path $script:LibRoot 'data\offline.json'
-$script:AppDataDir  = Join-Path $env:LOCALAPPDATA 'ProdCalendar'
-$script:CacheFile   = Join-Path $script:AppDataDir 'cache.json'
-$script:LogFile     = Join-Path $script:AppDataDir 'prodcalendar.log'
+$script:AppDataDir = Join-Path $env:LOCALAPPDATA 'ProdCalendar'
+$script:CacheFile = Join-Path $script:AppDataDir 'cache.json'
+$script:LogFile = Join-Path $script:AppDataDir 'prodcalendar.log'
 
 if (-not (Test-Path $script:AppDataDir)) { New-Item -ItemType Directory -Force -Path $script:AppDataDir | Out-Null }
 
@@ -21,7 +21,8 @@ function Write-Log {
     try {
         $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
         Add-Content -Path $script:LogFile -Value $line -Encoding UTF8
-    } catch { }
+    }
+    catch { }
 }
 
 function Test-LeapYear {
@@ -41,7 +42,8 @@ function Read-JsonFile {
         $raw = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
         if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
         return ($raw | ConvertFrom-Json)
-    } catch {
+    }
+    catch {
         Write-Log "Не удалось прочитать JSON '$Path': $($_.Exception.Message)"
         return $null
     }
@@ -52,7 +54,8 @@ function Save-Cache {
     try {
         $json = $Table | ConvertTo-Json -Compress
         [System.IO.File]::WriteAllText($script:CacheFile, $json, (New-Object System.Text.UTF8Encoding($false)))
-    } catch {
+    }
+    catch {
         Write-Log "Не удалось записать кэш: $($_.Exception.Message)"
     }
 }
@@ -93,7 +96,8 @@ function Get-DayCodes {
             $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
             $content = $sr.ReadToEnd()
             $sr.Close()
-        } finally {
+        }
+        finally {
             $resp.Close()
         }
         $codes = $content.Trim()
@@ -105,7 +109,8 @@ function Get-DayCodes {
             return @{ Year = $Year; Codes = $codes; Source = 'api' }
         }
         Write-Log "Год ${Year}: ответ API не прошёл проверку (длина $($codes.Length), ожидалось $expectedLen)"
-    } catch {
+    }
+    catch {
         Write-Log "Год ${Year}: API недоступен ($($_.Exception.Message))"
     }
 
@@ -155,14 +160,14 @@ function Get-MonthStat {
     }
     $wr = $work + $short
     [pscustomobject]@{
-        Month       = $Month
-        Calendar    = $days
-        Work        = $wr
-        Off         = $off
-        Short       = $short
-        Hours40     = [math]::Round($wr * 8.0 - $short, 1)
-        Hours36     = [math]::Round($wr * 7.2 - $short, 1)
-        Hours24     = [math]::Round($wr * 4.8 - $short, 1)
+        Month    = $Month
+        Calendar = $days
+        Work     = $wr
+        Off      = $off
+        Short    = $short
+        Hours40  = [math]::Round($wr * 8.0 - $short, 1)
+        Hours36  = [math]::Round($wr * 7.2 - $short, 1)
+        Hours24  = [math]::Round($wr * 4.8 - $short, 1)
     }
 }
 
@@ -206,6 +211,6 @@ function Get-DayType {
     }
 }
 
-$script:MonthShortRu = @('Янв','Фев','Мар','Апр','Май','Июн','Июл','Авг','Сен','Окт','Ноя','Дек')
-$script:MonthFullRu  = @('Январь','Февраль','Март','Апрель','Май','Июнь',
-                        'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь')
+$script:MonthShortRu = @('Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек')
+$script:MonthFullRu = @('Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')

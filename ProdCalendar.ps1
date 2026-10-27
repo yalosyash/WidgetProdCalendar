@@ -36,7 +36,8 @@ $app = Initialize-ProdCalendarApp -Scale $scale
 
 try {
     [System.Windows.Forms.Application]::Run($app.Ctx)
-} finally {
+}
+finally {
     Stop-ProdCalendarApp -App $app
     try { $script:Mutex.ReleaseMutex() } catch { }
     $script:Mutex.Dispose()
