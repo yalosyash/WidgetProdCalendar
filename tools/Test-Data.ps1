@@ -1,5 +1,8 @@
 ﻿# tools\Test-Data.ps1
 # Проверка слоя данных и навигации по кварталам (smoke-тест, не часть приложения).
+# StrictMode включён намеренно: приложение запускается с ним, значит и тесты должны
+# ловить те же ошибки (например, обращение к отсутствующему ключу хэш-таблицы).
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\App.ps1')
 

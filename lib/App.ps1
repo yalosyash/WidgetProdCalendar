@@ -218,12 +218,12 @@ function Initialize-ProdCalendarApp {
         $pc = $script:pc
         $hit = & $pc.HitTest $e.X $e.Y
         $key = ''
+        $text = ''
         if ($hit) {
-            if ($hit.Kind -in @('prev','next','expand')) { $key = $hit.Kind }
-            $pc.Ui.Tip.SetToolTip($pc.Form, $(if ($hit.Text) { $hit.Text } else { '' }))
-        } else {
-            $pc.Ui.Tip.SetToolTip($pc.Form, '')
+            if ($hit.ContainsKey('Kind') -and $hit.Kind -in @('prev','next','expand')) { $key = $hit.Kind }
+            if ($hit.ContainsKey('Text')) { $text = [string]$hit.Text }
         }
+        $pc.Ui.Tip.SetToolTip($pc.Form, $text)
         if ($key -ne $pc.HoverKey) {
             $pc.HoverKey = $key
             & $pc.UpdateView
