@@ -14,6 +14,20 @@ $script:CultureRu = [System.Globalization.CultureInfo]::GetCultureInfo('ru-RU')
 
 function Fmt1 { param([double]$v) return $v.ToString('0.0', $script:CultureRu) }
 
+function Fmt-Plural {
+    # Склонение существительного при числе: «31 календарный день».
+    param([int]$N, [string]$One, [string]$Few, [string]$Many)
+    $n = [Math]::Abs($N) % 100
+    if ($n -ge 11 -and $n -le 14) { return "$N $Many" }
+    switch ($n % 10) {
+        1 { return "$N $One" }
+        2 { return "$N $Few" }
+        3 { return "$N $Few" }
+        4 { return "$N $Few" }
+        default { return "$N $Many" }
+    }
+}
+
 function New-RoundPath {
     param([double]$X, [double]$Y, [double]$W, [double]$H, [double]$R)
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -30,51 +44,140 @@ function New-RoundPath {
     return $p
 }
 
-function Set-TooltipWindowStyles {
-    # Окно подсказки не должно забирать активацию: иначе показ подсказки
-    # вызывает Deactivate у основного окна и виджет сам себя закрывает.
+function Add-SoftShadow {
+    # Мягкая тень скруглённого прямоугольника на переданном полотне: вокруг
+    # прямоугольника рисуются концентрические скруглённые фигуры с малой альфой —
+    # у карточки плотнее, к краю сходит на нет. Пик намеренно низкий, затухание
+    # нелинейное: тень читается как лёгкая подсветка, а не как тёмная окантовка.
+    # $X/$Y — левый верхний угол «карточки» на полотне; поля тени $Margin должны
+    # уже помещаться в bitmap, иначе тень обрежется краем.
+    param(
+        [Parameter(Mandatory)]$Graphics,
+        [Parameter(Mandatory)][int]$X,
+        [Parameter(Mandatory)][int]$Y,
+        [Parameter(Mandatory)][int]$W,
+        [Parameter(Mandatory)][int]$H,
+        [Parameter(Mandatory)][int]$Margin,
+        [int]$Radius = 12,
+        [int]$OffsetY = 0,
+        [System.Drawing.Color]$Color = ([System.Drawing.Color]::FromArgb(0x1A, 0x20, 0x2E)),
+        [double]$Peak = 13.0
+    )
+    for ($i = $Margin; $i -ge 0; $i--) {
+        $alpha = [int]($Peak * [Math]::Pow(1.0 - ($i / [double]($Margin + 1)), 2.4))
+        if ($alpha -le 0) { continue }
+        $sc = [System.Drawing.Color]::FromArgb($alpha, $Color.R, $Color.G, $Color.B)
+        $sp = New-RoundPath ($X - $i) ($Y - $i + $OffsetY) ($W + $i * 2) ($H + $i * 2) ($Radius + $i)
+        $sb = New-Object System.Drawing.SolidBrush($sc)
+        $Graphics.FillPath($sb, $sp); $sb.Dispose(); $sp.Dispose()
+    }
+}
+
+function Set-LayeredWindowStyles {
+    # Окно не должно забирать активацию; у подсказки это критично: показ подсказки
+    # иначе вызывает Deactivate у основного окна и виджет сам себя закрывает.
     # WS_EX_NOACTIVATE — не активируется, WS_EX_TOOLWINDOW — нет в Alt+Tab,
-    # WS_EX_TRANSPARENT — не перехватывает клики.
+    # WS_EX_TRANSPARENT — не перехватывает клики, WS_EX_LAYERED — рисуется
+    # по пикселям с альфой (нужна настоящая прозрачность для тени).
+    #
+    # Флаги общие для подсказки и окна-тени виджета: у тени важно, чтобы клики
+    # сквозь неё попадали в виджет, а сама она не появлялась в Alt+Tab.
     #
     # Важно: WinForms-овский Form.Show() активирует окно даже с WS_EX_NOACTIVATE,
-    # поэтому подсказку показываем и прячем нативно (см. Show/HideNativeTip).
+    # поэтому подсказку показываем и прячем нативно (см. UpdateLayeredBitmap).
     param([Parameter(Mandatory)]$Form)
     if ($null -eq $Form -or $Form.IsDisposed -or -not $Form.IsHandleCreated) { return }
-    if (-not ('PcNative.TipWin' -as [type])) {
-        Add-Type -Namespace PcNative -Name TipWin -MemberDefinition @'
+    if (-not ('PcNative.Layered' -as [type])) {
+        Add-Type -Namespace PcNative -Name Layered -MemberDefinition @'
 [DllImport("user32.dll", SetLastError = true)] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 [DllImport("user32.dll", SetLastError = true)] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+[DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+[DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hDC);
+[DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+[DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr hObject);
+[DllImport("user32.dll", SetLastError = true)] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+[StructLayout(LayoutKind.Sequential)] public struct POINT { public int x; public int y; public POINT(int X, int Y) { x = X; y = Y; } }
+[StructLayout(LayoutKind.Sequential)] public struct SIZE { public int cx; public int cy; public SIZE(int X, int Y) { cx = X; cy = Y; } }
+[StructLayout(LayoutKind.Sequential)] public struct BLENDFUNCTION { public byte BlendOp; public byte BlendFlags; public byte SourceConstantAlpha; public byte AlphaFormat; }
+
+// Отдаёт окну готовый bitmap по пикселям (ULW_ALPHA): только так у подсказки
+// получается настоящая полупрозрачная тень, а не прямоугольная подложка.
+// HBITMAP создан вызывающим через Bitmap.GetHbitmap и здесь же удаляется.
+public static bool UpdateLayeredBitmap(IntPtr hwnd, IntPtr hBitmap, int x, int y, int w, int h) {
+    IntPtr screenDc = GetDC(IntPtr.Zero);
+    IntPtr memDc = CreateCompatibleDC(screenDc);
+    IntPtr oldBmp = SelectObject(memDc, hBitmap);
+    bool ok = false;
+    try {
+        POINT dst = new POINT(x, y);
+        POINT src = new POINT(0, 0);
+        SIZE size = new SIZE(w, h);
+        BLENDFUNCTION blend = new BLENDFUNCTION();
+        blend.BlendOp = 0; blend.BlendFlags = 0;
+        blend.SourceConstantAlpha = 255; blend.AlphaFormat = 1;   // AC_SRC_ALPHA
+        ok = UpdateLayeredWindow(hwnd, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2); // ULW_ALPHA
+    }
+    finally {
+        SelectObject(memDc, oldBmp);
+        DeleteObject(hBitmap);
+        DeleteDC(memDc);
+        ReleaseDC(IntPtr.Zero, screenDc);
+    }
+    return ok;
+}
 '@
     }
     $GWL_EXSTYLE = -20
     $WS_EX_NOACTIVATE = 0x08000000
     $WS_EX_TOOLWINDOW = 0x00000080
     $WS_EX_TRANSPARENT = 0x00000020
-    $ex = [PcNative.TipWin]::GetWindowLong($Form.Handle, $GWL_EXSTYLE)
-    [void][PcNative.TipWin]::SetWindowLong($Form.Handle, $GWL_EXSTYLE,
-        ($ex -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW -bor $WS_EX_TRANSPARENT))
+    $WS_EX_LAYERED = 0x00080000
+    $ex = [PcNative.Layered]::GetWindowLong($Form.Handle, $GWL_EXSTYLE)
+    [void][PcNative.Layered]::SetWindowLong($Form.Handle, $GWL_EXSTYLE,
+        ($ex -bor $WS_EX_NOACTIVATE -bor $WS_EX_TOOLWINDOW -bor $WS_EX_TRANSPARENT -bor $WS_EX_LAYERED))
 }
 
-function Show-NativeTipWindow {
-    # Показ/перемещение окна подсказки без активации: SetWindowPos с SWP_NOACTIVATE.
+function Show-LayeredWindow {
+    # Показ окна без активации: содержимое отдаём по пикселям через
+    # UpdateLayeredWindow (окно помечено WS_EX_LAYERED), поэтому тень вокруг
+    # карточки получается полупрозрачной, а не прямоугольной подложкой.
     # WinForms-овский Show() тут не годится — он активирует окно и виджет закрывается.
-    param([Parameter(Mandatory)]$Form, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y)
-    if ($null -eq $Form -or $Form.IsDisposed) { return }
+    param(
+        [Parameter(Mandatory)]$Form,
+        [Parameter(Mandatory)]$Bitmap,
+        [Parameter(Mandatory)][int]$X,
+        [Parameter(Mandatory)][int]$Y,
+        # $BelowForm — окно, ПОД которым держать это (тень виджета: она должна
+        # лежать прямо под виджетом, оставаясь в полосе topmost, поэтому ставим
+        # её не в самый низ Z-порядка, а сразу за окном виджета).
+        $BelowForm = $null
+    )
+    if ($null -eq $Form -or $Form.IsDisposed -or $null -eq $Bitmap) { return }
     [void]$Form.Handle
-    $HWND_TOPMOST = [IntPtr](-1)
-    $SWP_NOACTIVATE = 0x0010
-    $SWP_SHOWWINDOW = 0x0040
-    [void][PcNative.TipWin]::SetWindowPos($Form.Handle, $HWND_TOPMOST, $X, $Y, $Form.Width, $Form.Height,
-        ($SWP_NOACTIVATE -bor $SWP_SHOWWINDOW))
+
+    # GetHbitmap создаёт копию пикселей; владение передаём в UpdateLayeredBitmap,
+    # которая удаляет её сама (иначе утечка GDI-объекта на каждый показ).
+    $hBmp = $Bitmap.GetHbitmap([System.Drawing.Color]::FromArgb(0))
+    [void][PcNative.Layered]::UpdateLayeredBitmap($Form.Handle, $hBmp, $X, $Y, $Bitmap.Width, $Bitmap.Height)
+
+    # Позицию и размер задала ULW; здесь только показываем и ставим в Z-порядке,
+    # не трогая ни геометрию, ни активацию.
+    $SWP_NOSIZE = 0x0001; $SWP_NOMOVE = 0x0002; $SWP_NOACTIVATE = 0x0010; $SWP_SHOWWINDOW = 0x0040
+    $after = if ($null -ne $BelowForm -and $BelowForm.IsHandleCreated) { $BelowForm.Handle } else { [IntPtr](-1) }
+    [void][PcNative.Layered]::SetWindowPos($Form.Handle, $after, 0, 0, 0, 0,
+        ($SWP_NOSIZE -bor $SWP_NOMOVE -bor $SWP_NOACTIVATE -bor $SWP_SHOWWINDOW))
 }
 
-function Hide-NativeTipWindow {
+function Hide-LayeredWindow {
     param([Parameter(Mandatory)]$Form)
     if ($null -eq $Form -or $Form.IsDisposed -or -not $Form.IsHandleCreated) { return }
-    [void][PcNative.TipWin]::ShowWindow($Form.Handle, 0)   # SW_HIDE
+    [void][PcNative.Layered]::ShowWindow($Form.Handle, 0)   # SW_HIDE
 }
 
 function Set-RoundFormRegion {
@@ -153,7 +256,11 @@ function New-CalendarUi {
     $ui.Pad = Scl 16; $ui.Spacer = Scl 10
     $ui.HeaderH = Scl 50; $ui.FooterH = Scl 18
     $ui.Cols = 3
-    $ui.ButtonSize = Scl 34; $ui.BtnGap = Scl 8; $ui.Radius = Scl 10; $ui.CellRadius = Scl 7
+    $ui.BtnGap = Scl 8; $ui.Radius = Scl 10; $ui.CellRadius = Scl 7
+    # Кнопки навигации — широкие «пилюли» с подписью: мелкий одиночный шеврон
+    # не читался как кнопка. Ширину считаем по тексту при отрисовке, здесь —
+    # высота, отступы и зазор между шевроном и подписью.
+    $ui.ButtonH = Scl 34; $ui.BtnPadX = Scl 13; $ui.BtnGlyphGap = Scl 5
     # Скругление углов окна — чуть крупнее карточек, чтобы панель читалась цельно.
     $ui.WindowRadius = Scl 12
     $ui.FormWidth = $ui.Pad * 2 + $ui.Cols * $ui.CardW + ($ui.Cols - 1) * $ui.GapX
@@ -175,12 +282,15 @@ function New-CalendarUi {
     $ui.C_Footer = [System.Drawing.Color]::FromArgb(0x7A, 0x81, 0x94)
     $ui.C_Divider = [System.Drawing.Color]::FromArgb(0xEF, 0xF1, 0xF5)
 
-    # палитра подсказки — тёмная карточка поверх светлого фона
-    $ui.C_TipBg = [System.Drawing.Color]::FromArgb(0x24, 0x28, 0x33)
-    $ui.C_TipBorder = [System.Drawing.Color]::FromArgb(0x3A, 0x3F, 0x4D)
-    $ui.C_TipText = [System.Drawing.Color]::FromArgb(0xF3, 0xF5, 0xFA)
-    $ui.C_TipMuted = [System.Drawing.Color]::FromArgb(0x9C, 0xA4, 0xB8)
-    $ui.C_TipAccent = [System.Drawing.Color]::FromArgb(0x9E, 0x9A, 0xFF)
+    # Палитра подсказки — та же светлая карточка, что и у месяцев: подсказка
+    # читается как продолжение виджета, а не как отдельный тёмный элемент.
+    # Рамка чуть темнее карточной: карточка висит на произвольном фоне, и
+    # на светлом рабочем столе граница #E6E8EE почти не видна.
+    $ui.C_TipBg = $ui.C_CardBg
+    $ui.C_TipBorder = [System.Drawing.Color]::FromArgb(0xDC, 0xE0, 0xE9)
+    $ui.C_TipShadow = [System.Drawing.Color]::FromArgb(0x1A, 0x20, 0x2E)
+    $ui.C_TipText = $ui.C_Text
+    $ui.C_TipMuted = $ui.C_Muted
 
     # шрифты
     $ui.FTitle = New-Object System.Drawing.Font('Segoe UI', [float](13.5 * $S), [System.Drawing.FontStyle]::Bold)
@@ -189,17 +299,22 @@ function New-CalendarUi {
     $ui.FDay = New-Object System.Drawing.Font('Segoe UI', [float](10 * $S))
     $ui.FDayBold = New-Object System.Drawing.Font('Segoe UI', [float](10 * $S), [System.Drawing.FontStyle]::Bold)
     $ui.FStat = New-Object System.Drawing.Font('Segoe UI', [float](7.8 * $S))
-    $ui.FGlyph = New-Object System.Drawing.Font('Segoe UI', [float](12 * $S), [System.Drawing.FontStyle]::Bold)
+    $ui.FGlyph = New-Object System.Drawing.Font('Segoe UI', [float](13 * $S), [System.Drawing.FontStyle]::Bold)
+    $ui.FBtn = New-Object System.Drawing.Font('Segoe UI', [float](10 * $S), [System.Drawing.FontStyle]::Bold)
     $ui.FSmall = New-Object System.Drawing.Font('Segoe UI', [float](8 * $S))
 
-    # шрифты подсказки
-    $ui.FTipTitle = New-Object System.Drawing.Font('Segoe UI', [float](9.5 * $S), [System.Drawing.FontStyle]::Bold)
+    # Шрифты подсказки: заголовок — как у месяца, текст — как подписи в виджете.
+    $ui.FTipTitle = New-Object System.Drawing.Font('Segoe UI', [float](11.5 * $S), [System.Drawing.FontStyle]::Bold)
     $ui.FTipBody = New-Object System.Drawing.Font('Segoe UI', [float](9 * $S))
-    $ui.FTipTag = New-Object System.Drawing.Font('Segoe UI', [float](8 * $S), [System.Drawing.FontStyle]::Bold)
+    $ui.FTipTag = New-Object System.Drawing.Font('Segoe UI', [float](9 * $S), [System.Drawing.FontStyle]::Bold)
 
-    # размеры подсказки
-    $ui.TipPadX = Scl 12; $ui.TipPadY = Scl 9
-    $ui.TipRadius = Scl 8; $ui.TipGap = Scl 6
+    # Размеры подсказки: радиус и отступы — как у карточки месяца.
+    $ui.TipPadX = Scl 12; $ui.TipPadY = Scl 10
+    $ui.TipRadius = $ui.Radius; $ui.TipGap = Scl 6
+    # Тень: карточка «висит» над фоном. Размытие рисуем в самом bitmap, а вокруг
+    # оставляем поля $ui.TipShadow — иначе тень упиралась бы в края окна.
+    # Поля широкие, а пик альфы низкий: тень мягкая и не выбивается из светлого UI.
+    $ui.TipShadow = Scl 13; $ui.TipShadowY = Scl 3
 
     # форма
     $form = New-Object System.Windows.Forms.Form
@@ -218,7 +333,23 @@ function New-CalendarUi {
     # заметный «плывущий» кадр в момент разворота.
     $form.BackgroundImageLayout = 'None'
 
+    # Тень виджета: отдельное слоистое окно ПОД основным. Основное окно остаётся
+    # обычным (region + BackgroundImage), поэтому интерактивность и подсветка не
+    # меняются, а полупрозрачную тень рисует соседнее окно (см. Update-WidgetShadow).
+    $ui.ShadowMargin = Scl 14; $ui.ShadowY = Scl 4
+    $ui.C_ShadowSoft = [System.Drawing.Color]::FromArgb(0x1A, 0x20, 0x2E)
+
     $ui.Surface = $form
+    $ui.ShadowForm = New-Object System.Windows.Forms.Form
+    $ui.ShadowForm.FormBorderStyle = 'None'
+    $ui.ShadowForm.ShowInTaskbar = $false
+    $ui.ShadowForm.TopMost = $true
+    $ui.ShadowForm.StartPosition = 'Manual'
+    $ui.ShadowForm.BackColor = $ui.C_Bg
+    $ui.ShadowForm.BackgroundImageLayout = 'None'
+    [void]$ui.ShadowForm.Handle
+    Set-LayeredWindowStyles -Form $ui.ShadowForm
+
     $ui.TipForm = New-Object System.Windows.Forms.Form
     $ui.TipForm.FormBorderStyle = 'None'
     $ui.TipForm.ShowInTaskbar = $false
@@ -232,11 +363,116 @@ function New-CalendarUi {
     # Стили окна подсказки ставим ДО первого показа: если выставить их после Show,
     # первый показ успевает забрать активацию у виджета, и тот закрывается.
     [void]$ui.TipForm.Handle
-    Set-TooltipWindowStyles -Form $ui.TipForm
+    Set-LayeredWindowStyles -Form $ui.TipForm
     $ui.Bmp = $null
     $ui.TipBmp = $null
+    $ui.ShadowBmp = $null
     $ui.Hits = @()
     return $ui
+}
+
+function Update-WidgetShadow {
+    # Пересобирает и показывает окно-тень под виджетом. Тень рисуется по контуру
+    # скруглённого окна и живёт отдельным слоистым окном, поэтому не мешает
+    # интерактивности: клики проходят сквозь (WS_EX_TRANSPARENT).
+    param([Parameter(Mandatory)]$Ui, [Parameter(Mandatory)]$Form)
+    if ($null -eq $Ui -or -not $Ui.ContainsKey('ShadowForm')) { return }
+    $w = $Form.Width; $h = $Form.Height
+    if ($w -le 0 -or $h -le 0) { return }
+
+    $m = [int]$Ui.ShadowMargin; $radius = [int]$Ui.WindowRadius
+    $bmp = New-Object System.Drawing.Bitmap(($w + $m * 2), ($h + $m * 2 + [int]$Ui.ShadowY), [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'AntiAlias'
+    $g.Clear([System.Drawing.Color]::Transparent)
+    Add-SoftShadow -Graphics $g -X $m -Y $m -W $w -H $h -Margin $m -Radius $radius `
+        -OffsetY ([int]$Ui.ShadowY) -Color $Ui.C_ShadowSoft -Peak 16.0
+    # Вырезаем область окна: под виджетом тень не нужна, иначе светлый фон
+    # просвечивал бы через полупрозрачные пиксели и выглядел грязнее.
+    $card = New-RoundPath $m $m $w $h $radius
+    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+    $clear = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::Transparent)
+    $g.FillPath($clear, $card); $clear.Dispose(); $card.Dispose()
+    $g.Dispose()
+
+    if ($Ui.ShadowBmp) { $Ui.ShadowBmp.Dispose() }
+    $Ui.ShadowBmp = $bmp
+
+    # Позиция — на поля тени влево/вверх от виджета, плюс вертикальный сдвиг тени.
+    $px = $Form.Left - $m
+    $py = $Form.Top - $m
+    # -BelowForm: тень кладём сразу ПОД окно виджета, в ту же полосу topmost.
+    Show-LayeredWindow -Form $Ui.ShadowForm -Bitmap $bmp -X $px -Y $py -BelowForm $Form
+}
+
+function Hide-WidgetShadow {
+    param([Parameter(Mandatory)]$Ui)
+    if ($null -eq $Ui -or -not $Ui.ContainsKey('ShadowForm')) { return }
+    Hide-LayeredWindow -Form $Ui.ShadowForm
+}
+
+function Measure-HeaderButton {
+    # Ширина кнопки-«пилюли»: шеврон + подпись + внутренние отступы.
+    # Считаем по фактическому тексту, чтобы подпись «Квартал» нигде не обрезалась.
+    param([Parameter(Mandatory)]$Ui, [Parameter(Mandatory)]$Graphics, [string]$Glyph = '', [string]$Label = '')
+    $w = 0.0
+    if ($Glyph) { $w += $Graphics.MeasureString($Glyph, $Ui.FGlyph).Width }
+    if ($Glyph -and $Label) { $w += $Ui.BtnGlyphGap }
+    if ($Label) { $w += $Graphics.MeasureString($Label, $Ui.FBtn).Width }
+    return [int][Math]::Ceiling($w) + $Ui.BtnPadX * 2
+}
+
+function Draw-HeaderButton {
+    # Кнопка шапки: скруглённая «пилюля» с постоянной подложкой (чтобы читалась
+    # как кнопка ещё до наведения), крупным шевроном и подписью. Подпись — часть
+    # кнопки, поэтому глазу сразу ясно, что нажимать и куда это ведёт.
+    param(
+        [Parameter(Mandatory)]$Ui,
+        [Parameter(Mandatory)]$Graphics,
+        [Parameter(Mandatory)][int]$X,
+        [Parameter(Mandatory)][int]$Y,
+        [Parameter(Mandatory)][int]$W,
+        [Parameter(Mandatory)][int]$H,
+        [string]$Glyph = '',
+        [string]$Label = '',
+        [bool]$GlyphLeft = $true,
+        [bool]$Hover = $false,
+        [Parameter(Mandatory)]$InkBrush
+    )
+    $path = New-RoundPath $X $Y $W $H $Ui.Radius
+    # Подложка: на наведении акцентная, иначе — как у карточек, с рамкой.
+    $fb = New-Object System.Drawing.SolidBrush($(if ($Hover) { $Ui.C_AccentSoft } else { $Ui.C_CardBg }))
+    $Graphics.FillPath($fb, $path); $fb.Dispose()
+    $pen = New-Object System.Drawing.Pen($(if ($Hover) { $Ui.C_AccentSoft } else { $Ui.C_CardBorder }))
+    $Graphics.DrawPath($pen, $path); $pen.Dispose(); $path.Dispose()
+
+    $sfMid = New-Object System.Drawing.StringFormat
+    $sfMid.Alignment = 'Center'; $sfMid.LineAlignment = 'Center'
+
+    $parts = @()
+    if ($Glyph -and $Label) {
+        $parts = if ($GlyphLeft) { @(@{ T = $Glyph; F = $Ui.FGlyph }, @{ T = $Label; F = $Ui.FBtn }) }
+        else { @(@{ T = $Label; F = $Ui.FBtn }, @{ T = $Glyph; F = $Ui.FGlyph }) }
+    }
+    elseif ($Glyph) { $parts = @(@{ T = $Glyph; F = $Ui.FGlyph }) }
+    elseif ($Label) { $parts = @(@{ T = $Label; F = $Ui.FBtn }) }
+    if ($parts.Count -eq 0) { return }
+
+    # Ширины считаем теми же шрифтами, что и при измерении, и центрируем группу.
+    $sizes = @($parts | ForEach-Object { $Graphics.MeasureString($_.T, $_.F) })
+    $groupW = 0.0
+    for ($i = 0; $i -lt $sizes.Count; $i++) {
+        $groupW += $sizes[$i].Width
+        if ($i -lt $sizes.Count - 1 -and $parts[$i].F -ne $parts[$i + 1].F) { $groupW += $Ui.BtnGlyphGap }
+    }
+    $cx = $X + ($W - $groupW) / 2.0
+    for ($i = 0; $i -lt $parts.Count; $i++) {
+        $Graphics.DrawString($parts[$i].T, $parts[$i].F, $InkBrush,
+            (New-Object System.Drawing.RectangleF([float]$cx, [float]$Y, [float]($sizes[$i].Width + 2), [float]$H)), $sfMid)
+        $cx += $sizes[$i].Width
+        if ($i -lt $parts.Count - 1 -and $parts[$i].F -ne $parts[$i + 1].F) { $cx += $Ui.BtnGlyphGap }
+    }
+    $sfMid.Dispose()
 }
 
 function Get-CalendarSurfaceSize {
@@ -287,10 +523,14 @@ function Draw-CalendarSurface {
     $hits = New-Object System.Collections.ArrayList
 
     # ---------- шапка ----------
-    $btn = $Ui.ButtonSize
-    $hy = $Ui.Pad + [int](($Ui.HeaderH - $btn) / 2)
+    # Кнопки навигации — широкие «пилюли» с подписью, кнопка разворота — справа.
+    # Ширины считаем заранее: от них зависит и область заголовка.
+    $btnH = $Ui.ButtonH
+    $hy = $Ui.Pad + [int](($Ui.HeaderH - $btnH) / 2)
     $expandKey = $(if ($rows -gt 1) { [char]0x25BC } else { [char]0x25B2 })
-    $expRect = New-Object System.Drawing.Rectangle(($w - $Ui.Pad - $btn), $hy, $btn, $btn)
+    $expandLabel = $(if ($rows -gt 1) { 'Свернуть' } else { 'Развернуть' })
+    $expW = Measure-HeaderButton -Ui $Ui -Graphics $g -Glyph ([string]$expandKey) -Label $expandLabel
+    $expRect = New-Object System.Drawing.Rectangle(($w - $Ui.Pad - $expW), $hy, $expW, $btnH)
     $expandTip = if ($rows -gt 1) {
         @{ Title = 'Свернуть'; Meta = 'Показать один квартал'; Badge = ''; Tone = 'plain' }
     }
@@ -298,38 +538,28 @@ function Draw-CalendarSurface {
         @{ Title = 'Развернуть'; Meta = 'Показать два квартала'; Badge = ''; Tone = 'plain' }
     }
     [void]$hits.Add(@{ Kind = 'expand'; Rect = $expRect; Tip = $expandTip })
-    $rp = New-RoundPath $expRect.X $expRect.Y $expRect.Width $expRect.Height $Ui.Radius
-    if ($HoverKey -eq 'expand') {
-        $hb = New-Object System.Drawing.SolidBrush($Ui.C_AccentSoft)
-        $g.FillPath($hb, $rp); $hb.Dispose()
-    }
-    $g.DrawString([string]$expandKey, $Ui.FGlyph, $brAccent, (New-Object System.Drawing.RectangleF($expRect.X, $expRect.Y, $expRect.Width, $expRect.Height)), $sf)
-    $rp.Dispose()
+    Draw-HeaderButton -Ui $Ui -Graphics $g -X $expRect.X -Y $expRect.Y -W $expRect.Width -H $expRect.Height `
+        -Glyph ([string]$expandKey) -Label $expandLabel -GlyphLeft $false -Hover ($HoverKey -eq 'expand') -InkBrush $brAccent
 
     $titleLeft = $Ui.Pad
     $titleRight = $expRect.X - $Ui.BtnGap
     if ($ShowArrows) {
-        $prevRect = New-Object System.Drawing.Rectangle($Ui.Pad, $hy, $btn, $btn)
-        $nextRect = New-Object System.Drawing.Rectangle(($expRect.X - $Ui.BtnGap - $btn), $hy, $btn, $btn)
+        $prevW = Measure-HeaderButton -Ui $Ui -Graphics $g -Glyph ([string][char]0x2039) -Label 'Квартал'
+        $nextW = Measure-HeaderButton -Ui $Ui -Graphics $g -Glyph ([string][char]0x203A) -Label 'Квартал'
+        $prevRect = New-Object System.Drawing.Rectangle($Ui.Pad, $hy, $prevW, $btnH)
+        $nextRect = New-Object System.Drawing.Rectangle(($expRect.X - $Ui.BtnGap - $nextW), $hy, $nextW, $btnH)
         [void]$hits.Add(@{ Kind = 'prev'; Rect = $prevRect
                 Tip = @{ Title = 'Предыдущий квартал'; Meta = 'Колесо вверх · ←'; Badge = ''; Tone = 'plain' } 
             })
         [void]$hits.Add(@{ Kind = 'next'; Rect = $nextRect
                 Tip = @{ Title = 'Следующий квартал'; Meta = 'Колесо вниз · →'; Badge = ''; Tone = 'plain' } 
             })
-        foreach ($b in @(
-                @{ R = $prevRect; Key = 'prev'; G = [char]0x2039 },
-                @{ R = $nextRect; Key = 'next'; G = [char]0x203A }
-            )) {
-            $rp = New-RoundPath $b.R.X $b.R.Y $b.R.Width $b.R.Height $Ui.Radius
-            if ($HoverKey -eq $b.Key) {
-                $hb = New-Object System.Drawing.SolidBrush($Ui.C_AccentSoft)
-                $g.FillPath($hb, $rp); $hb.Dispose()
-            }
-            $g.DrawString([string]$b.G, $Ui.FGlyph, $brAccent, (New-Object System.Drawing.RectangleF($b.R.X, $b.R.Y, $b.R.Width, $b.R.Height)), $sf)
-            $rp.Dispose()
-        }
+        Draw-HeaderButton -Ui $Ui -Graphics $g -X $prevRect.X -Y $prevRect.Y -W $prevRect.Width -H $prevRect.Height `
+            -Glyph ([string][char]0x2039) -Label 'Квартал' -GlyphLeft $true -Hover ($HoverKey -eq 'prev') -InkBrush $brAccent
+        Draw-HeaderButton -Ui $Ui -Graphics $g -X $nextRect.X -Y $nextRect.Y -W $nextRect.Width -H $nextRect.Height `
+            -Glyph ([string][char]0x203A) -Label 'Квартал' -GlyphLeft $false -Hover ($HoverKey -eq 'next') -InkBrush $brAccent
         $titleLeft = $prevRect.Right + $Ui.BtnGap
+        if ($nextRect.X - $Ui.BtnGap -gt $titleLeft) { $titleRight = $nextRect.X - $Ui.BtnGap }
     }
     $titleRect = New-Object System.Drawing.RectangleF($titleLeft, $Ui.Pad, ($titleRight - $titleLeft), $Ui.HeaderH)
     $g.DrawString($HeaderTitle, $Ui.FTitle, $brText, $titleRect, $sf)
@@ -428,7 +658,7 @@ function Draw-CalendarSurface {
 
                 $g.DrawString($label, $font, $brush, $rectF, $sf)
                 $dayTip = Build-DayTip -Year $mo.Year -Month $mo.Month -Day $d -Code $code
-                if ($isToday) { $dayTip.Badge = 'Сегодня' }
+                if ($isToday) { $dayTip.Badge = 'Сегодня'; $dayTip.Tone = 'today' }
                 [void]$hits.Add(@{
                         Kind = 'day'
                         Rect = (New-Object System.Drawing.Rectangle($x, $y, $Ui.CellW, $Ui.CellH))
@@ -499,7 +729,7 @@ function Build-MonthTip {
         $tip.Badge = 'загрузка…'
         return $tip
     }
-    $tip.Badge = ("{0} календарных дней" -f $Stat.Calendar)
+    $tip.Badge = (Fmt-Plural $Stat.Calendar 'календарный день' 'календарных дня' 'календарных дней')
     $tip.Lines = @(
         ("Рабочих {0}  ·  выходных {1}" -f $Stat.Work, $Stat.Off),
         ("Норма: {0} / {1} / {2} ч" -f (Fmt1 $Stat.Hours40), (Fmt1 $Stat.Hours36), (Fmt1 $Stat.Hours24))
@@ -508,19 +738,25 @@ function Build-MonthTip {
 }
 
 function Get-TipTone {
-    # Цвет текста и подложки «пилюли» в зависимости от типа дня.
+    # Цвет текста и подложки статуса — те же оттенки, что у дней в сетке:
+    # «выходной» красный и «сокращённый» янтарный совпадают с ячейками месяца.
+    # Рабочий день нейтральный: в сетке он чёрный на белом, и в подсказке ему
+    # цвет не положен — акцент остаётся за событиями, а не за фоном недели.
     param($Ui, [string]$Tone)
     switch ($Tone) {
-        'off' { return @{ Text = [System.Drawing.Color]::FromArgb(0xFF, 0x8A, 0x8D); Fill = [System.Drawing.Color]::FromArgb(48, 0xE5, 0x48, 0x4D) } }
-        'short' { return @{ Text = [System.Drawing.Color]::FromArgb(0xFF, 0xC4, 0x6B); Fill = [System.Drawing.Color]::FromArgb(48, 0xD9, 0x82, 0x0B) } }
-        'work' { return @{ Text = $Ui.C_TipAccent; Fill = [System.Drawing.Color]::FromArgb(48, 0x6C, 0x63, 0xFF) } }
-        default { return @{ Text = $Ui.C_TipMuted; Fill = [System.Drawing.Color]::FromArgb(40, 0x9C, 0xA4, 0xB8) } }
+        'off' { return @{ Text = $Ui.C_Red; Fill = $Ui.C_RedBg } }
+        'short' { return @{ Text = $Ui.C_Amber; Fill = $Ui.C_AmberBg } }
+        # Акцент — только у «сегодня»: в сетке сегодняшний день тоже залит
+        # акцентом, поэтому подсказка совпадает с виджетом.
+        'today' { return @{ Text = $Ui.C_Accent; Fill = $Ui.C_AccentSoft } }
+        default { return @{ Text = $Ui.C_Muted; Fill = $Ui.C_Divider } }
     }
 }
 
 function New-CalendarTooltipBitmap {
-    # Современная карточка подсказки: тёмная, со скруглением, пилюлей статуса
-    # и акцентной полосой слева. Отрисовывается в bitmap и отдаётся окну подсказки.
+    # Карточка подсказки в стиле виджета: тот же светлый фон, рамка и скругление,
+    # что у месяца, статус — «пилюлей» с мягкой подложкой и цветом дня из сетки.
+    # Отрисовывается в bitmap и отдаётся окну подсказки.
     param([Parameter(Mandatory)]$Ui, [Parameter(Mandatory)]$Tip)
 
     $S = $Ui.Scale
@@ -550,7 +786,6 @@ function New-CalendarTooltipBitmap {
     $pg.Dispose(); $probe.Dispose()
 
     $padX = $Ui.TipPadX; $padY = $Ui.TipPadY
-    $barW = [int][Math]::Max(3, $S * 3)
     $badgeH = if ($badge) { [int][Math]::Ceiling($szBadge.Height + $S * 5) } else { 0 }
     $badgeW = if ($badge) { [int][Math]::Ceiling($szBadge.Width + $S * 14) } else { 0 }
     $row2H = [int][Math]::Ceiling([Math]::Max([double]$badgeH, [double]$szMeta.Height))
@@ -563,33 +798,44 @@ function New-CalendarTooltipBitmap {
         if ($badge -and $meta) { $row2W += $S * 8 }
         $contentW = [Math]::Max($contentW, $row2W)
     }
-    $w = [int][Math]::Ceiling($contentW) + $padX * 2 + $barW
+    $w = [int][Math]::Ceiling($contentW) + $padX * 2
     $h = [int][Math]::Ceiling($szTitle.Height) + $gapRow + $row2H + $gapLines + [int][Math]::Ceiling($hLines) + $padY * 2
     $w = [Math]::Max($w, [int]($S * 104))
     $h = [Math]::Max($h, [int]($S * 34))
 
-    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    # Полотно больше карточки на поля тени: тень рисуется по пикселям с альфой
+    # (окно слоистое), поэтому вокруг карточки остаётся настоящая прозрачность.
+    $sh = [int]$Ui.TipShadow
+    $bw = $w + $sh * 2
+    $bh = $h + $sh * 2 + [int]$Ui.TipShadowY
+
+    $bmp = New-Object System.Drawing.Bitmap($bw, $bh, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = 'AntiAlias'
     $g.TextRenderingHint = 'ClearTypeGridFit'
-    $g.Clear($Ui.C_TipBg)
+    $g.Clear([System.Drawing.Color]::Transparent)
 
-    # акцентная полоса слева
-    $barPath = New-RoundPath 0 ([int]($S * 4)) $barW ($h - [int]($S * 8)) ([int]($S * 2))
-    $bb = New-Object System.Drawing.SolidBrush($col.Text)
-    $g.FillPath($bb, $barPath); $bb.Dispose(); $barPath.Dispose()
+    # Мягкая тень вокруг карточки (см. Add-SoftShadow).
+    Add-SoftShadow -Graphics $g -X $sh -Y $sh -W $w -H $h -Margin $sh -Radius $Ui.TipRadius `
+        -OffsetY ([int]$Ui.TipShadowY) -Color $Ui.C_TipShadow -Peak 13.0
 
-    # рамка карточки
+    # Дальше вся отрисовка — в координатах карточки.
+    $g.TranslateTransform([float]$sh, [float]$sh)
+
+    # Карточка: белый фон под рамкой, чтобы сквозь неё не просвечивала тень.
+    $cp = New-RoundPath 0 0 $w $h $Ui.TipRadius
+    $cb = New-Object System.Drawing.SolidBrush($Ui.C_TipBg)
+    $g.FillPath($cb, $cp); $cb.Dispose()
+    # Рамка карточки — как у месяца; рисуется до содержимого, чтобы текст был поверх.
     $penB = New-Object System.Drawing.Pen($Ui.C_TipBorder)
-    $bp = New-RoundPath 0.5 0.5 ($w - 1) ($h - 1) ($Ui.TipRadius - 1)
-    $g.DrawPath($penB, $bp); $penB.Dispose(); $bp.Dispose()
+    $g.DrawPath($penB, $cp); $penB.Dispose(); $cp.Dispose()
 
     $sfC = New-Object System.Drawing.StringFormat
     $sfC.Alignment = 'Center'; $sfC.LineAlignment = 'Center'
     $sfL = New-Object System.Drawing.StringFormat
     $sfL.Alignment = 'Near'; $sfL.LineAlignment = 'Center'
 
-    $x = $padX + $barW
+    $x = $padX
     $y = $padY
     $brTitle = New-Object System.Drawing.SolidBrush($Ui.C_TipText)
     $g.DrawString($title, $Ui.FTipTitle, $brTitle, [float]$x, [float]$y)
@@ -601,7 +847,7 @@ function New-CalendarTooltipBitmap {
         if ($badge) {
             $pillH = $badgeH
             $pillY = $y + [int](($row2H - $pillH) / 2)
-            $pp = New-RoundPath $rx $pillY $badgeW $pillH ([int]($pillH / 2))
+            $pp = New-RoundPath $rx $pillY $badgeW $pillH $Ui.CellRadius
             $pb = New-Object System.Drawing.SolidBrush($col.Fill)
             $g.FillPath($pb, $pp); $pb.Dispose(); $pp.Dispose()
             $sb = New-Object System.Drawing.SolidBrush($col.Text)
@@ -653,22 +899,25 @@ function Show-CalendarTooltip {
     if ($Ui.TipBmp) { $Ui.TipBmp.Dispose() }
     $Ui.TipBmp = $bmp
 
+    # Окно слоистое: содержимое отдаётся целиком из bitmap, регион и
+    # BackgroundImage не нужны — они бы обрезали полупрозрачную тень по краям.
     $tf.Size = New-Object System.Drawing.Size($bmp.Width, $bmp.Height)
-    $tf.BackgroundImage = $bmp
-    Set-RoundFormRegion -Form $tf -Radius $Ui.TipRadius
 
     # Точка отсчёта — курсор: смещаем карточку вниз-вправо, как системную.
+    # Из смещения вычитаем поле тени, чтобы зазор считался от края карточки,
+    # а не от прозрачного края полотна.
+    $sh = [int]$Ui.TipShadow
     $cur = [System.Windows.Forms.Cursor]::Position
     $wa = [System.Windows.Forms.Screen]::FromControl($Surface).WorkingArea
-    $px = $cur.X + $Ui.TipGap
-    $py = $cur.Y + $Ui.TipGap
+    $px = $cur.X + $Ui.TipGap - $sh
+    $py = $cur.Y + $Ui.TipGap - $sh
     # У правого/нижнего края экрана разворачиваем карточку в другую сторону.
-    if (($px + $bmp.Width) -gt ($wa.Right - 2)) { $px = $cur.X - $bmp.Width - $Ui.TipGap }
-    if (($py + $bmp.Height) -gt ($wa.Bottom - 2)) { $py = $cur.Y - $bmp.Height - $Ui.TipGap }
+    if (($px + $bmp.Width) -gt ($wa.Right - 2)) { $px = $cur.X - ($bmp.Width - $sh) - $Ui.TipGap }
+    if (($py + $bmp.Height) -gt ($wa.Bottom - 2)) { $py = $cur.Y - ($bmp.Height - $sh) - $Ui.TipGap }
     $px = [Math]::Max($wa.Left + 2, [Math]::Min($px, $wa.Right - $bmp.Width - 2))
     $py = [Math]::Max($wa.Top + 2, [Math]::Min($py, $wa.Bottom - $bmp.Height - 2))
     # Показываем нативно, без активации — иначе виджет получит Deactivate и закроется.
-    Show-NativeTipWindow -Form $tf -X $px -Y $py
+    Show-LayeredWindow -Form $tf -Bitmap $bmp -X $px -Y $py
 }
 
 function Test-CalendarTooltipVisible {
@@ -678,11 +927,11 @@ function Test-CalendarTooltipVisible {
     if ($null -eq $Ui -or -not $Ui.ContainsKey('TipForm')) { return $false }
     $tf = $Ui.TipForm
     if ($null -eq $tf -or $tf.IsDisposed -or -not $tf.IsHandleCreated) { return $false }
-    return [PcNative.TipWin]::IsWindowVisible($tf.Handle)
+    return [PcNative.Layered]::IsWindowVisible($tf.Handle)
 }
 
 function Hide-CalendarTooltip {
     param($Ui)
     if ($null -eq $Ui -or -not $Ui.ContainsKey('TipForm')) { return }
-    Hide-NativeTipWindow -Form $Ui.TipForm
+    Hide-LayeredWindow -Form $Ui.TipForm
 }

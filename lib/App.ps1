@@ -85,8 +85,15 @@ function Initialize-ProdCalendarApp {
     $pc.Reposition = {
         $pc = $script:pc; $form = $pc.Form
         $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        # Отступ от края не меньше полей тени: иначе тень у правого/нижнего края
+        # экрана обрезалась бы, и окно выглядело бы «приклеенным» к границе.
         $mx = [int](8 * $pc.Scale)
+        $need = [int]$pc.Ui.ShadowMargin + [int]$pc.Ui.ShadowY + [int](2 * $pc.Scale)
+        if ($mx -lt $need) { $mx = $need }
         $form.Location = New-Object System.Drawing.Point(($wa.Right - $form.Width - $mx), ($wa.Bottom - $form.Height - $mx))
+        # Тень пересобираем только для видимого окна: в Show перемещение идёт до
+        # показа, и тень иначе мелькнула бы без виджета.
+        if ($form.Visible) { Update-WidgetShadow -Ui $pc.Ui -Form $form }
     }
     $pc.ResetToDefault = {
         # Виджет всегда открывается в исходном состоянии: разворот, выбранный
@@ -115,11 +122,15 @@ function Initialize-ProdCalendarApp {
         & $pc.ResetToDefault
         & $pc.Reposition
         $pc.Form.Show(); $pc.Form.Activate(); $pc.Form.BringToFront()
+        # Тень показываем после виджета и кладём ПОД него: она дополняет форму,
+        # но не перекрывает виджет и не перехватывает клики.
+        Update-WidgetShadow -Ui $pc.Ui -Form $pc.Form
         $pc.LastShow = [DateTime]::Now
     }
     $pc.Hide = {
         $pc = $script:pc
         & $pc.ClearHover
+        Hide-WidgetShadow -Ui $pc.Ui
         $pc.Form.Hide()
     }
     $pc.Toggle = { $pc = $script:pc; if ($pc.Form.Visible) { & $pc.Hide } else { & $pc.Show } }
@@ -451,5 +462,7 @@ function Stop-ProdCalendarApp {
     try { foreach ($ps in @($App.LoadPs.Values)) { $ps.Dispose() } } catch { }
     try { if ($App.Ui -and $App.Ui.TipBmp) { $App.Ui.TipBmp.Dispose() } } catch { }
     try { if ($App.Ui -and $App.Ui.TipForm) { $App.Ui.TipForm.Dispose() } } catch { }
+    try { if ($App.Ui -and $App.Ui.ShadowBmp) { $App.Ui.ShadowBmp.Dispose() } } catch { }
+    try { if ($App.Ui -and $App.Ui.ShadowForm) { $App.Ui.ShadowForm.Dispose() } } catch { }
     try { if ($App.Form) { $App.Form.Dispose() } } catch { }
 }
