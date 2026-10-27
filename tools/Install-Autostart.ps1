@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $vbs = Join-Path $PSScriptRoot 'Run-Hidden.vbs'
+$ico = Join-Path $projectRoot 'assets\calendar.ico'
 $startup = [Environment]::GetFolderPath('Startup')
 $lnkPath = Join-Path $startup 'ProdCalendar.lnk'
 
@@ -20,7 +21,8 @@ if ($Remove) {
     if (Test-Path $lnkPath) {
         Remove-Item -Force $lnkPath
         Write-Host "Автозапуск удалён: $lnkPath"
-    } else {
+    }
+    else {
         Write-Host "Ярлык автозапуска не найден: $lnkPath"
     }
     return
@@ -33,6 +35,7 @@ $lnk = $ws.CreateShortcut($lnkPath)
 $lnk.TargetPath = $vbs
 $lnk.WorkingDirectory = $projectRoot
 $lnk.Description = 'Виджет производственного календаря'
+if (Test-Path $ico) { $lnk.IconLocation = "$ico,0" }
 $lnk.Save()
 
 Write-Host "Автозапуск включён: $lnkPath"
