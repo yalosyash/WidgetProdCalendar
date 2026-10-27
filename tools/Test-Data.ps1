@@ -1,7 +1,7 @@
 ﻿# tools\Test-Data.ps1
-# Быстрая проверка слоя данных (шаг 2). Не часть приложения.
+# Проверка слоя данных и навигации (быстрый smoke-тест, не часть приложения).
 $ErrorActionPreference = 'Stop'
-. (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\Data.ps1')
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'lib\App.ps1')
 
 Write-Host "Доступные годы (офлайн): $((Get-AvailableYears) -join ', ')"
 
@@ -22,3 +22,23 @@ Write-Host "30.04.2026 -> $(Get-DayType -Codes $d.Codes -Date (Get-Date '2026-04
 Write-Host "09.03.2026 -> $(Get-DayType -Codes $d.Codes -Date (Get-Date '2026-03-09'))"
 Write-Host "11.05.2026 -> $(Get-DayType -Codes $d.Codes -Date (Get-Date '2026-05-11'))"
 Write-Host "01.04.2026 -> $(Get-DayType -Codes $d.Codes -Date (Get-Date '2026-04-01'))"
+
+# --- навигация через модуль приложения (ловит регрессии вроде отсутствия Get-MonthStat) ---
+Write-Host "`nПроверка UI-навигации:"
+$app = Initialize-ProdCalendarApp -Scale 1.0
+try {
+    & $app.StartLoad $app.State.Year
+    $deadline = (Get-Date).AddSeconds(10)
+    while (-not $app.LoadHnd.IsCompleted -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    & $app.CompleteLoad
+    Write-Host ("  загрузка: год={0} источник={1} лет={2}" -f $app.State.Year, $app.State.Source, $app.State.Codes.Length)
+    foreach ($delta in 1, 1, -1, -1, -1) {
+        & $app.Step -Delta $delta
+        Write-Host ("  шаг {0,2}: {1}" -f $delta, $app.Ui.Title.Text)
+    }
+    Write-Host ("  сводка: {0}" -f ($app.Ui.Summary.Text -replace "`r`n", ' | '))
+    Write-Host ("  источник: {0}" -f $app.Ui.Source.Text)
+    Write-Host '  навигация OK'
+} finally {
+    Stop-ProdCalendarApp -App $app
+}
