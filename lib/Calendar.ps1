@@ -112,7 +112,8 @@ function Draw-CalendarSurface {
         [string]$HeaderTitle = '',
         [string]$FooterLeft = '',
         [string]$FooterRight = '',
-        [string]$HoverKey = ''
+        [string]$HoverKey = '',
+        [bool]$ShowArrows = $true
     )
 
     $S = $Ui.Scale
@@ -147,28 +148,39 @@ function Draw-CalendarSurface {
     # ---------- шапка ----------
     $btn = $Ui.ButtonSize
     $hy = $Ui.Pad + [int](($Ui.HeaderH - $btn) / 2)
-    $prevRect = New-Object System.Drawing.Rectangle($Ui.Pad, $hy, $btn, $btn)
-    $nextRect = New-Object System.Drawing.Rectangle(($w - $Ui.Pad - $btn), $hy, $btn, $btn)
-    $expRect  = New-Object System.Drawing.Rectangle(($nextRect.X - $Ui.BtnGap - $btn), $hy, $btn, $btn)
-    [void]$hits.Add(@{ Kind = 'prev';   Rect = $prevRect })
-    [void]$hits.Add(@{ Kind = 'next';   Rect = $nextRect })
+    $expandKey = $(if ($rows -gt 1) { [char]0x25BC } else { [char]0x25B2 })
+    $expRect  = New-Object System.Drawing.Rectangle(($w - $Ui.Pad - $btn), $hy, $btn, $btn)
     [void]$hits.Add(@{ Kind = 'expand'; Rect = $expRect })
-
-    foreach ($b in @(
-        @{ R = $prevRect; Key = 'prev';   G = [char]0x2039 },
-        @{ R = $nextRect; Key = 'next';   G = [char]0x203A },
-        @{ R = $expRect;  Key = 'expand'; G = $(if ($rows -gt 1) { [char]0x25BC } else { [char]0x25B2 }) }
-    )) {
-        $rp = New-RoundPath $b.R.X $b.R.Y $b.R.Width $b.R.Height $Ui.Radius
-        if ($HoverKey -eq $b.Key) {
-            $hb = New-Object System.Drawing.SolidBrush($Ui.C_AccentSoft)
-            $g.FillPath($hb, $rp); $hb.Dispose()
-        }
-        $g.DrawString([string]$b.G, $Ui.FGlyph, $brAccent, (New-Object System.Drawing.RectangleF($b.R.X, $b.R.Y, $b.R.Width, $b.R.Height)), $sf)
-        $rp.Dispose()
+    $rp = New-RoundPath $expRect.X $expRect.Y $expRect.Width $expRect.Height $Ui.Radius
+    if ($HoverKey -eq 'expand') {
+        $hb = New-Object System.Drawing.SolidBrush($Ui.C_AccentSoft)
+        $g.FillPath($hb, $rp); $hb.Dispose()
     }
+    $g.DrawString([string]$expandKey, $Ui.FGlyph, $brAccent, (New-Object System.Drawing.RectangleF($expRect.X, $expRect.Y, $expRect.Width, $expRect.Height)), $sf)
+    $rp.Dispose()
 
-    $titleRect = New-Object System.Drawing.RectangleF(($prevRect.Right + $Ui.BtnGap), $Ui.Pad, ($expRect.X - $Ui.BtnGap - $prevRect.Right - $Ui.BtnGap), $Ui.HeaderH)
+    $titleLeft = $Ui.Pad
+    $titleRight = $expRect.X - $Ui.BtnGap
+    if ($ShowArrows) {
+        $prevRect = New-Object System.Drawing.Rectangle($Ui.Pad, $hy, $btn, $btn)
+        $nextRect = New-Object System.Drawing.Rectangle(($expRect.X - $Ui.BtnGap - $btn), $hy, $btn, $btn)
+        [void]$hits.Add(@{ Kind = 'prev'; Rect = $prevRect })
+        [void]$hits.Add(@{ Kind = 'next'; Rect = $nextRect })
+        foreach ($b in @(
+            @{ R = $prevRect; Key = 'prev'; G = [char]0x2039 },
+            @{ R = $nextRect; Key = 'next'; G = [char]0x203A }
+        )) {
+            $rp = New-RoundPath $b.R.X $b.R.Y $b.R.Width $b.R.Height $Ui.Radius
+            if ($HoverKey -eq $b.Key) {
+                $hb = New-Object System.Drawing.SolidBrush($Ui.C_AccentSoft)
+                $g.FillPath($hb, $rp); $hb.Dispose()
+            }
+            $g.DrawString([string]$b.G, $Ui.FGlyph, $brAccent, (New-Object System.Drawing.RectangleF($b.R.X, $b.R.Y, $b.R.Width, $b.R.Height)), $sf)
+            $rp.Dispose()
+        }
+        $titleLeft = $prevRect.Right + $Ui.BtnGap
+    }
+    $titleRect = New-Object System.Drawing.RectangleF($titleLeft, $Ui.Pad, ($titleRight - $titleLeft), $Ui.HeaderH)
     $g.DrawString($HeaderTitle, $Ui.FTitle, $brText, $titleRect, $sf)
 
     # ---------- карточки месяцев ----------

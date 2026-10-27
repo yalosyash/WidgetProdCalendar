@@ -169,10 +169,10 @@ function Initialize-ProdCalendarApp {
         } else {
             $footerLeft = 'данные: ' + (Get-SourceDisplayName -Source $src -Year $pc.Year)
         }
-        $footerRight = if ($pc.Expanded) { "$([char]0x25BC) свернуть · ‹ › кварталы" } else { "$([char]0x25B2) развернуть · ‹ › кварталы" }
+        $footerRight = if ($pc.Expanded) { "$([char]0x25BC) свернуть · колесо — листать кварталы" } else { "$([char]0x25B2) развернуть · ‹ › кварталы" }
 
         Draw-CalendarSurface -Ui $ui -Months $months.ToArray() -HeaderTitle $header `
-            -FooterLeft $footerLeft -FooterRight $footerRight -HoverKey $pc.HoverKey
+            -FooterLeft $footerLeft -FooterRight $footerRight -HoverKey $pc.HoverKey -ShowArrows (-not $pc.Expanded)
 
         foreach ($y in $needYears) { & $pc.EnsureYear $y }
     }
@@ -230,6 +230,13 @@ function Initialize-ProdCalendarApp {
         }
     })
     $pc.Form.Add_MouseLeave({ $script:pc.Ui.Tip.SetToolTip($script:pc.Form, '') })
+    $pc.Form.Add_MouseWheel({
+        param($s, $e)
+        $pc = $script:pc
+        # В развёрнутом виде стрелки скрыты: кварталы листаются колесом.
+        if (-not $pc.Expanded) { return }
+        if ($e.Delta -gt 0) { & $pc.Step -Delta -1 } else { & $pc.Step -Delta 1 }
+    })
     $pc.Form.Add_MouseClick({
         param($s, $e)
         if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }

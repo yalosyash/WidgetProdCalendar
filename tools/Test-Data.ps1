@@ -39,6 +39,8 @@ try {
     & $app.Step -Delta -1; Write-Host ("  Q{0} {1}: {2}" -f $app.Quarter, $app.Year, ((& $names) -join ' | '))
     & $app.Step -Delta 1;  Write-Host ("  Q{0} {1}: {2}" -f $app.Quarter, $app.Year, ((& $names) -join ' | '))
     & $app.ToggleExpand;   Write-Host ("  разворот ({0} карточек): {1}" -f (@($app.Ui.Hits | Where-Object Kind -eq 'card').Count), ((& $names) -join ' | '))
+    $arrowsInExpanded = @($app.Ui.Hits | Where-Object { $_.Kind -in @('prev','next') }).Count
+    Write-Host ("  стрелки в развёрнутом виде (ожидаем 0): {0}" -f $arrowsInExpanded)
     & $app.ToggleExpand;   Write-Host ("  сворачивание: {0} карточек" -f (@($app.Ui.Hits | Where-Object Kind -eq 'card').Count))
     Write-Host '  навигация OK'
 } finally {
