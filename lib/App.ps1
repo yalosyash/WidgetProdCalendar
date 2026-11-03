@@ -61,7 +61,10 @@ function Initialize-ProdCalendarApp {
         LastShow    = [DateTime]::MinValue
         Tray        = $null
         Timer       = $null
+        DeactivateTimer = $null
         Ctx         = New-Object System.Windows.Forms.ApplicationContext
+        ShortcutScript = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\New-Shortcut.ps1'
+        AutostartScript = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\Install-Autostart.ps1'
         DataLib     = $dataLib
     }
     $script:pc = $pc
@@ -119,6 +122,7 @@ function Initialize-ProdCalendarApp {
     }
     $pc.Show = {
         $pc = $script:pc
+        $pc.DeactivateTimer.Stop()
         & $pc.ResetToDefault
         & $pc.Reposition
         $pc.Form.Show(); $pc.Form.Activate(); $pc.Form.BringToFront()
@@ -130,6 +134,7 @@ function Initialize-ProdCalendarApp {
     $pc.Hide = {
         $pc = $script:pc
         & $pc.ClearHover
+        $pc.DeactivateTimer.Stop()
         Hide-WidgetShadow -Ui $pc.Ui
         $pc.Form.Hide()
     }
@@ -299,7 +304,7 @@ function Initialize-ProdCalendarApp {
     # --- подсказки -----------------------------------------------------------
     # Показываем не сразу, а после задержки наведения: иначе подсказки мигают
     # при движении мыши. Задержка — отдельным таймером, чтобы не блокировать UI.
-    $pc.TipDelayMs = 450
+    $pc.TipDelayMs = 800
     # Если подсказка уже показана, соседний элемент обновляет её почти сразу:
     # иначе перебор дней мышью постоянно прятал бы подсказку.
     $pc.TipWarmMs = 90
@@ -401,8 +406,20 @@ function Initialize-ProdCalendarApp {
                 ([System.Windows.Forms.Keys]::Down) { if ($pc.Expanded) { & $pc.ToggleExpand }; $e.Handled = $true }
             }
         })
+    # Потеря фокуса приходит раньше нажатия по значку трея. Даём обработчику
+    # значка переключить ещё видимое окно, прежде чем скрывать его извне.
+    $deactivateTimer = New-Object System.Windows.Forms.Timer
+    $deactivateTimer.Interval = 150
+    $deactivateTimer.Add_Tick({
+            $pc = $script:pc
+            $pc.DeactivateTimer.Stop()
+            if (-not $pc.Form.ContainsFocus) { & $pc.Hide }
+        })
+    $pc.DeactivateTimer = $deactivateTimer
     $pc.Form.Add_Deactivate({
-            if ((([DateTime]::Now) - $script:pc.LastShow).TotalMilliseconds -gt 250) { & $script:pc.Hide }
+            if ((([DateTime]::Now) - $script:pc.LastShow).TotalMilliseconds -gt 250) {
+                $script:pc.DeactivateTimer.Start()
+            }
         })
 
     # --- трей ---------------------------------------------------------------
@@ -419,7 +436,63 @@ function Initialize-ProdCalendarApp {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $miCal = $menu.Items.Add('Календарь')
     $miUpd = $menu.Items.Add('Обновить данные')
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $miShortcut = $menu.Items.Add('Создать ярлык на рабочем столе')
+    $miAutoAdd = $menu.Items.Add('Добавить в автозапуск')
+    $miAutoAdd.Name = 'AutostartAdd'
+    $miAutoRemove = $menu.Items.Add('Убрать из автозапуска')
+    $miAutoRemove.Name = 'AutostartRemove'
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $miExit = $menu.Items.Add('Выход')
+    # Проверяем ярлык при каждом открытии: его могли удалить или создать извне.
+    $menu.Add_Opening({
+            param($sender, $e)
+            $shortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'ProdCalendar.lnk'
+            $enabled = Test-Path -LiteralPath $shortcut
+            $sender.Items['AutostartAdd'].Enabled = -not $enabled
+            $sender.Items['AutostartRemove'].Enabled = $enabled
+        })
+    $miAutoAdd.Add_Click({
+            try {
+                & $script:pc.AutostartScript | Out-Null
+            }
+            catch {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    "Не удалось добавить виджет в автозапуск: $($_.Exception.Message)",
+                    'Производственный календарь',
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+    $miAutoRemove.Add_Click({
+            try {
+                & $script:pc.AutostartScript -Remove | Out-Null
+            }
+            catch {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    "Не удалось убрать виджет из автозапуска: $($_.Exception.Message)",
+                    'Производственный календарь',
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+    $miShortcut.Add_Click({
+            try {
+                & $script:pc.ShortcutScript | Out-Null
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    'Ярлык «Производственный календарь» создан на рабочем столе.',
+                    'Производственный календарь',
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Information)
+            }
+            catch {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    "Не удалось создать ярлык на рабочем столе: $($_.Exception.Message)",
+                    'Производственный календарь',
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
     $miCal.Add_Click({ & $script:pc.Show })
     $miUpd.Add_Click({
             $pc = $script:pc
@@ -429,11 +502,10 @@ function Initialize-ProdCalendarApp {
         })
     $miExit.Add_Click({ $script:pc.Tray.Visible = $false; $script:pc.Tray.Dispose(); $script:pc.Ctx.ExitThread() })
     $tray.ContextMenuStrip = $menu
-    $tray.Add_MouseClick({
+    $tray.Add_MouseDown({
             param($s, $e)
             if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { & $script:pc.Toggle }
         })
-    $tray.Add_DoubleClick({ & $script:pc.Show })
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 200
@@ -457,6 +529,7 @@ function Stop-ProdCalendarApp {
     param($App)
     if ($null -eq $App) { return }
     try { if ($App.TipTimer) { $App.TipTimer.Stop(); $App.TipTimer.Dispose() } } catch { }
+    try { if ($App.DeactivateTimer) { $App.DeactivateTimer.Stop(); $App.DeactivateTimer.Dispose() } } catch { }
     try { if ($App.Timer) { $App.Timer.Stop(); $App.Timer.Dispose() } } catch { }
     try { if ($App.Tray) { $App.Tray.Visible = $false; $App.Tray.Dispose() } } catch { }
     try { foreach ($ps in @($App.LoadPs.Values)) { $ps.Dispose() } } catch { }

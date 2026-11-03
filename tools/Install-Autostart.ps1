@@ -12,7 +12,7 @@ param([switch]$Remove)
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$vbs = Join-Path $PSScriptRoot 'Run-Hidden.vbs'
+$vbs = Join-Path $projectRoot 'StartCalendar.vbs'
 $ico = Join-Path $projectRoot 'assets\calendar.ico'
 $startup = [Environment]::GetFolderPath('Startup')
 $lnkPath = Join-Path $startup 'ProdCalendar.lnk'

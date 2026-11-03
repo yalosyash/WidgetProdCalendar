@@ -21,7 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$vbs = Join-Path $PSScriptRoot 'Run-Hidden.vbs'
+$vbs = Join-Path $projectRoot 'StartCalendar.vbs'
 $ico = Join-Path $projectRoot 'assets\calendar.ico'
 $desktop = [Environment]::GetFolderPath('Desktop')
 $startup = [Environment]::GetFolderPath('StartMenu')

@@ -1,6 +1,6 @@
 ﻿# tools\Restart-Widget.ps1
 # Перезапуск виджета: тихо гасит текущий экземпляр и поднимает его заново
-# (без окна консоли, через Run-Hidden.vbs).
+# (без окна консоли, через «StartCalendar.vbs»).
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Restart-Widget.ps1
 #
@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$vbs = Join-Path $PSScriptRoot 'Run-Hidden.vbs'
+$vbs = Join-Path $projectRoot 'StartCalendar.vbs'
 $entry = Join-Path $projectRoot 'ProdCalendar.ps1'
 
 if (-not (Test-Path $entry)) { throw "Не найден входной скрипт: $entry" }
